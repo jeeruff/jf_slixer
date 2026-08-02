@@ -1,12 +1,12 @@
-desc:jf_slixer - transient slicer / pad sampler
+desc:jf_slixer - dual-deck transient slicer / pad sampler
 //tags: sampler slicer drums
 //author: jeeruff
 
-options:maxmem=16777216
+options:maxmem=33554432
 options:gmem=jf_slixer
 
 slider1:sens=0.50<0.05,1,0.01>Transient sensitivity
-slider2:basenote=36<0,96,1>Base MIDI note
+slider2:basenote_a=36<0,127,1>Deck A base note
 slider3:monomode=0<0,1,1{Poly,Mono}>Voice mode
 slider4:legato=0<0,1,1{Off,On}>Legato
 slider5:glide_ms=0<0,500,1>Glide (ms)
@@ -16,11 +16,18 @@ slider8:mgain_db=0<-24,12,0.1>Master gain (dB)
 slider9:caplen=8<1,120,1>Max capture (s)
 slider10:saveaudio=1<0,1,1{No,Yes}>Save audio in project
 slider11:thru=1<0,1,1{Off,On}>Input passthrough
+slider12:xfade=0.5<0,1,0.001>Crossfade A-B
+slider13:outmode=0<0,1,1{Mix on 1/2,Split A:1/2 B:3/4}>Output routing
+slider14:basenote_b=84<0,127,1>Deck B base note
+slider15:mcha=0<0,16,1>Deck A MIDI channel (0=omni)
+slider16:mchb=0<0,16,1>Deck B MIDI channel (0=omni)
 
 in_pin:left
 in_pin:right
-out_pin:left
-out_pin:right
+out_pin:out 1 (A / mix L)
+out_pin:out 2 (A / mix R)
+out_pin:out 3 (B L)
+out_pin:out 4 (B R)
 
 @init
 ext_noinit = 1;
@@ -30,29 +37,26 @@ MAXSL   = 64;
 NVOICE  = 16;
 VF      = 32;
 MAGIC   = 8888123;
+BINSZ   = 256;
 
 // memory map
 qoff    = 3000;               // pending note-off queue, 32*3
-SLBASE  = 4096;               // 14 contiguous tables of 64
-sl_start = SLBASE;
-sl_end   = SLBASE + 64;
-sl_pitch = SLBASE + 128;
-sl_gain  = SLBASE + 192;
-sl_pan   = SLBASE + 256;
-sl_fx    = SLBASE + 320;
-sl_amt   = SLBASE + 384;
-sl_p2    = SLBASE + 448;
-sl_choke = SLBASE + 512;
-sl_class = SLBASE + 576;
-sl_mout  = SLBASE + 640;
-sl_mnum  = SLBASE + 704;
-sl_mchan = SLBASE + 768;
-sl_mbus  = SLBASE + 832;
-voices  = 8192;               // 16 * 32
-OVW     = 24576;              // overview bins (min,max), 256 frames/bin
-BUF     = 131072;             // stereo interleaved
-BUFMAXFR = (16777216 - BUF) / 2;
-BINSZ   = 256;
+dk_frames = 3200;             // per-deck scalars, index by deck 0/1
+dk_srate  = 3204;
+dk_nsl    = 3208;
+dk_sel    = 3212;
+SL0     = 4096;               // slice tables: deck stride 1024, field stride 64
+V0      = 8192;               // voices: deck stride 1024 (16 * 32)
+PRE     = 16384;              // presets: 16 slots (2 decks * 8) * 1024
+OVW0    = 65536;              // overview bins: deck stride 65536
+BUF0    = 262144;             // audio: stereo interleaved, deck stride below
+DECKW   = (33554432 - BUF0) / 2;
+DECKFR  = DECKW / 2;
+
+// slice field offsets within deck slice base
+OF_START=0; OF_END=64; OF_PITCH=128; OF_GAIN=192; OF_PAN=256; OF_FX=320;
+OF_AMT=384; OF_P2=448; OF_CHOKE=512; OF_CLASS=576; OF_MOUT=640; OF_MNUM=704;
+OF_MCHAN=768; OF_MBUS=832;
 
 // voice fields
 fA=0; fS=1; fPOS=2; fRATE=3; fTR=4; fENV=5; fST=6; fGL=7; fGR=8; fNOTE=9;
@@ -61,28 +65,34 @@ fPH1=18; fCEN=19; fEND=20; fVEL=21; fONOTE=22; fOCH=23; fOBUS=24;
 
 !initdone ? (
   initdone = 1;
-  sel = -1;
-  pv_req = -1;
+  cur = 0;
+  dk_sel[0] = -1; dk_sel[1] = -1;
+  dk_srate[0] = srate; dk_srate[1] = srate;
+  pv_req = -1; pv_deck = 0;
   fld_active = -1;
   task = 0;
-  cap_srate = srate;
 );
 
-function slice_defaults(i) (
-  sl_pitch[i]=0; sl_gain[i]=0; sl_pan[i]=0;
-  sl_fx[i]=0; sl_amt[i]=0.5; sl_p2[i]=0.5;
-  sl_choke[i]=0; sl_class[i]=0;
-  sl_mout[i]=0; sl_mnum[i]=36+i; sl_mchan[i]=0; sl_mbus[i]=0;
+function slb(d) ( SL0 + d*1024 );
+function dbuf(d) ( BUF0 + d*DECKW );
+
+function slice_defaults(d i) local(sb) (
+  sb = slb(d);
+  sb[OF_PITCH+i]=0; sb[OF_GAIN+i]=0; sb[OF_PAN+i]=0;
+  sb[OF_FX+i]=0; sb[OF_AMT+i]=0.5; sb[OF_P2+i]=0.5;
+  sb[OF_CHOKE+i]=0; sb[OF_CLASS+i]=0;
+  sb[OF_MOUT+i]=0; sb[OF_MNUM+i]=36+i; sb[OF_MCHAN+i]=0; sb[OF_MBUS+i]=0;
 );
 
-function sort_slices() local(i j k p t) (
+function sort_slices(d) local(sb i j k p t) (
+  sb = slb(d);
   i = 1;
-  while (i < nsl) (
+  while (i < dk_nsl[d]) (
     j = i;
-    while (j > 0 && sl_start[j-1] > sl_start[j]) (
+    while (j > 0 && sb[OF_START+j-1] > sb[OF_START+j]) (
       k = 0;
       while (k < 14) (
-        p = SLBASE + k*64 + j;
+        p = sb + k*64 + j;
         t = p[-1]; p[-1] = p[0]; p[0] = t;
         k += 1;
       );
@@ -92,60 +102,92 @@ function sort_slices() local(i j k p t) (
   );
 );
 
-function calc_ends() local(i) (
-  sort_slices();
+function calc_ends(d) local(sb i) (
+  sort_slices(d);
+  sb = slb(d);
   i = 0;
-  while (i < nsl) (
-    sl_end[i] = i < nsl-1 ? sl_start[i+1] : capframes;
+  while (i < dk_nsl[d]) (
+    sb[OF_END+i] = i < dk_nsl[d]-1 ? sb[OF_START+i+1] : dk_frames[d];
     i += 1;
   );
 );
 
-function del_slice(idx) local(j k p) (
+function del_slice(d idx) local(sb j k p) (
+  sb = slb(d);
   j = idx;
-  while (j < nsl-1) (
+  while (j < dk_nsl[d]-1) (
     k = 0;
     while (k < 14) (
-      p = SLBASE + k*64 + j;
+      p = sb + k*64 + j;
       p[0] = p[1];
       k += 1;
     );
     j += 1;
   );
-  nsl -= 1;
-  sel >= nsl ? sel = nsl-1;
-  calc_ends();
+  dk_nsl[d] -= 1;
+  dk_sel[d] >= dk_nsl[d] ? dk_sel[d] = dk_nsl[d]-1;
+  calc_ends(d);
 );
 
-function add_slice(fr) local(i) (
-  nsl < MAXSL && capframes > 0 ? (
-    fr = max(0, min(capframes-64, floor(fr)));
-    sl_start[nsl] = fr;
-    slice_defaults(nsl);
-    nsl += 1;
-    calc_ends();
-    i = 0; sel = 0;
-    while (i < nsl) ( sl_start[i] == fr ? sel = i; i += 1; );
+function add_slice(d fr) local(sb i) (
+  sb = slb(d);
+  dk_nsl[d] < MAXSL && dk_frames[d] > 0 ? (
+    fr = max(0, min(dk_frames[d]-64, floor(fr)));
+    sb[OF_START+dk_nsl[d]] = fr;
+    slice_defaults(d, dk_nsl[d]);
+    dk_nsl[d] += 1;
+    calc_ends(d);
+    i = 0; dk_sel[d] = 0;
+    while (i < dk_nsl[d]) ( sb[OF_START+i] == fr ? dk_sel[d] = i; i += 1; );
   );
 );
 
-function import_markers() local(n i p) (
+function import_markers(d) local(sb n i p) (
+  sb = slb(d);
   n = min(gmem[2], MAXSL);
-  capframes > 0 && n > 0 ? (
-    nsl = 0;
+  dk_frames[d] > 0 && n > 0 ? (
+    dk_nsl[d] = 0;
     i = 0;
     while (i < n) (
-      p = floor(gmem[8+i] * cap_srate);
-      p >= 0 && p < capframes ? (
-        sl_start[nsl] = p;
-        slice_defaults(nsl);
-        nsl += 1;
+      p = floor(gmem[8+i] * dk_srate[d]);
+      p >= 0 && p < dk_frames[d] ? (
+        sb[OF_START+dk_nsl[d]] = p;
+        slice_defaults(d, dk_nsl[d]);
+        dk_nsl[d] += 1;
       );
       i += 1;
     );
-    calc_ends();
-    sel = nsl > 0 ? 0 : -1;
+    calc_ends(d);
+    dk_sel[d] = dk_nsl[d] > 0 ? 0 : -1;
   );
+);
+
+function preset_save(d slot) local(p) (
+  p = PRE + (d*8+slot)*1024;
+  p[0] = 1;
+  p[1] = dk_nsl[d];
+  memcpy(p+16, slb(d), 896);
+);
+
+function preset_load(d slot) local(p i sb) (
+  p = PRE + (d*8+slot)*1024;
+  sb = slb(d);
+  p[0] ? (
+    memcpy(sb, p+16, 896);
+    dk_nsl[d] = p[1];
+    i = dk_nsl[d]-1;
+    while (i >= 0) (
+      sb[OF_START+i] >= max(dk_frames[d],64) ? del_slice(d, i);
+      i -= 1;
+    );
+    calc_ends(d);
+    dk_sel[d] = dk_nsl[d] > 0 ? min(max(dk_sel[d],0), dk_nsl[d]-1) : -1;
+  );
+);
+
+function preset_clear(d slot) local(p) (
+  p = PRE + (d*8+slot)*1024;
+  p[0] = 0;
 );
 
 function qpush(v) (
@@ -157,19 +199,20 @@ function qpush(v) (
   v[fONOTE] = 0;
 );
 
+// audio-thread read; cd_buf / cd_frames must be set for the deck first
 function readsmp(pos ch) local(i f a b c d c1 c2 c3) (
   pos < 1 ? pos = 1;
-  pos > capframes-3 ? pos = capframes-3;
+  pos > cd_frames-3 ? pos = cd_frames-3;
   interp < 0.5 ? (
-    BUF[floor(pos+0.5)*2+ch];
+    cd_buf[floor(pos+0.5)*2+ch];
   ) : interp < 1.5 ? (
     i = floor(pos); f = pos - i;
-    a = BUF[i*2+ch];
-    a + (BUF[i*2+2+ch] - a) * f;
+    a = cd_buf[i*2+ch];
+    a + (cd_buf[i*2+2+ch] - a) * f;
   ) : (
     i = floor(pos); f = pos - i;
-    a = BUF[(i-1)*2+ch]; b = BUF[i*2+ch];
-    c = BUF[(i+1)*2+ch]; d = BUF[(i+2)*2+ch];
+    a = cd_buf[(i-1)*2+ch]; b = cd_buf[i*2+ch];
+    c = cd_buf[(i+1)*2+ch]; d = cd_buf[(i+2)*2+ch];
     c1 = 0.5*(c-a);
     c2 = a - 2.5*b + 2*c - 0.5*d;
     c3 = 0.5*(d-a) + 1.5*(b-c);
@@ -177,14 +220,15 @@ function readsmp(pos ch) local(i f a b c d c1 c2 c3) (
   );
 );
 
-function trigger_slice(s vel note ofs) local(vi v cg tr vol pl pr leg was best bi) (
-  s >= 0 && s < nsl && capframes > 0 && sl_start[s] < sl_end[s] ? (
-    cg = sl_choke[s];
+function trigger_slice(d s vel note ofs) local(sb vb vi v cg tr vol pl pr leg was best bi) (
+  sb = slb(d); vb = V0 + d*1024;
+  s >= 0 && s < dk_nsl[d] && dk_frames[d] > 0 && sb[OF_START+s] < sb[OF_END+s] ? (
+    cg = sb[OF_CHOKE+s];
     cg ? (
       vi = 0;
       while (vi < NVOICE) (
-        v = voices + vi*VF;
-        v[fA] && sl_choke[v[fS]] == cg ? v[fST] = 3;
+        v = vb + vi*VF;
+        v[fA] && sb[OF_CHOKE+v[fS]] == cg ? v[fST] = 3;
         vi += 1;
       );
     );
@@ -193,87 +237,97 @@ function trigger_slice(s vel note ofs) local(vi v cg tr vol pl pr leg was best b
     ) : (
       bi = -1; best = 2; vi = 0;
       while (vi < NVOICE) (
-        v = voices + vi*VF;
+        v = vb + vi*VF;
         v[fA] == 0 ? ( bi = vi; vi = NVOICE; )
         : ( v[fENV] <= best ? ( best = v[fENV]; bi = vi; ); vi += 1; );
       );
       vi = bi;
     );
-    v = voices + vi*VF;
+    v = vb + vi*VF;
     v[fA] && v[fONOTE] ? qpush(v);
     was = v[fA] && v[fST] != 3;
     leg = monomode && legato && was;
-    tr = pow(2, sl_pitch[s]/12) * (cap_srate > 0 ? cap_srate/srate : 1);
+    tr = pow(2, sb[OF_PITCH+s]/12) * (dk_srate[d] > 0 ? dk_srate[d]/srate : 1);
     v[fTR] = tr;
     v[fRATE] = (monomode && glide_ms > 0 && was) ? v[fRATE] : tr;
-    v[fS] = s; v[fEND] = sl_end[s];
-    v[fPOS] = sl_start[s]; v[fVT] = sl_start[s];
-    v[fPA] = sl_start[s]; v[fPB] = sl_start[s];
+    v[fS] = s; v[fEND] = sb[OF_END+s];
+    v[fPOS] = sb[OF_START+s]; v[fVT] = sb[OF_START+s];
+    v[fPA] = sb[OF_START+s]; v[fPB] = sb[OF_START+s];
     v[fPHA] = 0; v[fPHB] = 0.5;
     leg ? 0 : (
       v[fENV] = v[fA] ? v[fENV] : 0;
       v[fST] = 1;
     );
-    vol = pow(10, sl_gain[s]/20) * (vel/127);
-    pl = min(1, 1 - sl_pan[s]); pr = min(1, 1 + sl_pan[s]);
+    vol = pow(10, sb[OF_GAIN+s]/20) * (vel/127);
+    pl = min(1, 1 - sb[OF_PAN+s]); pr = min(1, 1 + sb[OF_PAN+s]);
     v[fGL] = vol*pl; v[fGR] = vol*pr;
     v[fBCC] = 0; v[fBHL] = 0; v[fBHR] = 0; v[fPH1] = 0; v[fCEN] = 0;
     v[fNOTE] = note; v[fVEL] = vel;
     v[fA] = 1;
-    sl_mout[s] == 1 ? (
-      midi_bus = sl_mbus[s];
-      midisend(ofs, $x90 | sl_mchan[s], sl_mnum[s], vel);
-      v[fONOTE] = sl_mnum[s]+1; v[fOCH] = sl_mchan[s]; v[fOBUS] = sl_mbus[s];
-    ) : sl_mout[s] == 2 ? (
-      midi_bus = sl_mbus[s];
-      midisend(ofs, $xB0 | sl_mchan[s], sl_mnum[s], vel);
+    sb[OF_MOUT+s] == 1 ? (
+      midi_bus = sb[OF_MBUS+s];
+      midisend(ofs, $x90 | sb[OF_MCHAN+s], sb[OF_MNUM+s], vel);
+      v[fONOTE] = sb[OF_MNUM+s]+1; v[fOCH] = sb[OF_MCHAN+s]; v[fOBUS] = sb[OF_MBUS+s];
+    ) : sb[OF_MOUT+s] == 2 ? (
+      midi_bus = sb[OF_MBUS+s];
+      midisend(ofs, $xB0 | sb[OF_MCHAN+s], sb[OF_MNUM+s], vel);
       v[fONOTE] = 0;
     ) : v[fONOTE] = 0;
-    last_trig = s;
   );
 );
 
-function release_note(note) local(vi v) (
+function release_note(note) local(d vi v vb) (
   gatemode ? (
-    vi = 0;
-    while (vi < NVOICE) (
-      v = voices + vi*VF;
-      v[fA] && v[fNOTE] == note ? v[fST] = 3;
-      vi += 1;
+    d = 0;
+    while (d < 2) (
+      vb = V0 + d*1024;
+      vi = 0;
+      while (vi < NVOICE) (
+        v = vb + vi*VF;
+        v[fA] && v[fNOTE] == note ? v[fST] = 3;
+        vi += 1;
+      );
+      d += 1;
     );
   );
 );
 
-function kill_all() local(vi v) (
-  vi = 0;
-  while (vi < NVOICE) (
-    v = voices + vi*VF;
-    v[fA] ? v[fST] = 3;
-    vi += 1;
+function kill_all() local(d vi v) (
+  d = 0;
+  while (d < 2) (
+    vi = 0;
+    while (vi < NVOICE) (
+      v = V0 + d*1024 + vi*VF;
+      v[fA] ? v[fST] = 3;
+      vi += 1;
+    );
+    d += 1;
   );
 );
 
-function finish_capture() local(b) (
+function finish_capture() local(b ob) (
   capturing = 0; armed = 0;
-  capframes = wr;
-  cap_srate = srate;
+  dk_frames[rec_d] = wr;
+  dk_srate[rec_d] = srate;
   wr > 0 && (wr & (BINSZ-1)) ? (
     b = floor(wr/BINSZ);
-    OVW[b*2] = binmin; OVW[b*2+1] = binmax;
+    ob = OVW0 + rec_d*65536;
+    ob[b*2] = binmin;
+    ob[b*2+1] = binmax;
   );
-  nsl > 0 ? calc_ends();
+  dk_nsl[rec_d] > 0 ? calc_ends(rec_d);
 );
 
 @slider
 
 @block
-// derived coefs (cheap; also covers footer-UI edits of slider vars)
 mvol = pow(10, mgain_db/20);
 gcoef = glide_ms <= 0 ? 1 : 1 - exp(-1/(glide_ms * 0.001 * srate));
 atk_inc = 1 / max(1, 0.0015*srate);
 rel_c = exp(-1/(0.004*srate));
+xga = cos(xfade * $pi * 0.5);
+xgb = sin(xfade * $pi * 0.5);
 
-// flush pending note-offs from voices that ended in @sample
 qi = 0;
 while (qi < qn) (
   q = qoff + qi*3;
@@ -283,22 +337,22 @@ while (qi < qn) (
 );
 qn = 0;
 
-// auto-import take markers published by the Lua bridge
 gmem[0] == MAGIC && gmem[1] != g_serial ? (
   g_serial = gmem[1];
-  !capturing ? import_markers();
+  !capturing ? import_markers(cur);
 );
 
-// pad preview from UI
 pv_req >= 0 ? (
-  trigger_slice(pv_req, 100, -1, 0);
+  trigger_slice(pv_deck, pv_req, 100, -1, 0);
   pv_req = -1;
 );
 
 while (midirecv(ofs, m1, m2, m3)) (
   st = m1 & $xF0;
+  mch = m1 & $x0F;
   st == $x90 && m3 > 0 ? (
-    trigger_slice(m2 - basenote, m3, m2, ofs);
+    (mcha == 0 || mch == mcha-1) ? trigger_slice(0, m2 - basenote_a, m3, m2, ofs);
+    (mchb == 0 || mch == mchb-1) ? trigger_slice(1, m2 - basenote_b, m3, m2, ofs);
     midi_act = 1;
   ) : (st == $x80 || (st == $x90 && m3 == 0)) ? (
     release_note(m2);
@@ -309,7 +363,7 @@ while (midirecv(ofs, m1, m2, m3)) (
 );
 
 @sample
-// capture
+// capture into rec_d
 armed ? (
   !capturing ? (
     (play_state & 1) || (abs(spl0) + abs(spl1) > 0.001) ? (
@@ -318,15 +372,17 @@ armed ? (
     );
   );
   capturing ? (
-    maxfr = min(BUFMAXFR, caplen * srate);
+    maxfr = min(DECKFR, caplen * srate);
     wr < maxfr ? (
-      BUF[wr*2] = spl0; BUF[wr*2+1] = spl1;
+      rb = dbuf(rec_d);
+      rb[wr*2] = spl0; rb[wr*2+1] = spl1;
       cm = (spl0 + spl1) * 0.5;
       cm > binmax ? binmax = cm;
       cm < binmin ? binmin = cm;
       (wr & (BINSZ-1)) == (BINSZ-1) ? (
-        OVW[floor(wr/BINSZ)*2] = binmin;
-        OVW[floor(wr/BINSZ)*2+1] = binmax;
+        rob = OVW0 + rec_d*65536;
+        rob[floor(wr/BINSZ)*2] = binmin;
+        rob[floor(wr/BINSZ)*2+1] = binmax;
         binmin = 1; binmax = -1;
       );
       wr += 1;
@@ -336,122 +392,148 @@ armed ? (
   );
 );
 
-outl = 0; outr = 0;
-vi = 0;
-while (vi < NVOICE) (
-  v = voices + vi*VF;
-  v[fA] ? (
-    s = v[fS];
-    fx = sl_fx[s];
-    amt = sl_amt[s]; p2 = sl_p2[s];
-    v[fRATE] += (v[fTR] - v[fRATE]) * gcoef;
-    rt = v[fRATE];
+d_l0 = 0; d_r0 = 0; d_l1 = 0; d_r1 = 0;
+dd = 0;
+while (dd < 2) (
+  cd_buf = dbuf(dd);
+  cd_frames = dk_frames[dd];
+  cd_sb = slb(dd);
+  cd_vb = V0 + dd*1024;
+  aol = 0; aor = 0;
+  vi = 0;
+  while (vi < NVOICE) (
+    v = cd_vb + vi*VF;
+    v[fA] ? (
+      s = v[fS];
+      fx = cd_sb[OF_FX+s];
+      amt = cd_sb[OF_AMT+s]; p2 = cd_sb[OF_P2+s];
+      v[fRATE] += (v[fTR] - v[fRATE]) * gcoef;
+      rt = v[fRATE];
 
-    fx == 2 ? (
-      // granular stretch: 2 hann-windowed heads, timeline independent of pitch
-      spd = pow(4, 1 - 2*amt) * (cap_srate > 0 ? cap_srate/srate : 1);
-      glen = (0.02 + p2*0.1) * srate;
-      v[fVT] += spd;
-      v[fPA] += rt; v[fPB] += rt;
-      v[fPHA] += 1/glen; v[fPHB] += 1/glen;
-      v[fPHA] >= 1 ? ( v[fPHA] -= 1; v[fPA] = v[fVT]; );
-      v[fPHB] >= 1 ? ( v[fPHB] -= 1; v[fPB] = v[fVT]; );
-      wa = 0.5 - 0.5*cos(2*$pi*v[fPHA]);
-      wb = 0.5 - 0.5*cos(2*$pi*v[fPHB]);
-      l = readsmp(v[fPA],0)*wa + readsmp(v[fPB],0)*wb;
-      r = readsmp(v[fPA],1)*wa + readsmp(v[fPB],1)*wb;
-      v[fVT] >= v[fEND] ? v[fST] = 3;
-    ) : fx == 4 ? (
-      // FM of playback position
-      frq = 30 * pow(2, p2*7);
-      v[fPH1] += frq/srate * 2*$pi;
-      mp = v[fPOS] + sin(v[fPH1]) * amt*amt*400;
-      l = readsmp(mp,0); r = readsmp(mp,1);
-      v[fPOS] += rt;
-      v[fPOS] >= v[fEND] ? v[fST] = 3;
-    ) : (
-      l = readsmp(v[fPOS],0); r = readsmp(v[fPOS],1);
-      v[fPOS] += rt;
-      v[fPOS] >= v[fEND] ? v[fST] = 3;
-    );
-
-    fx == 1 ? (
-      // bitcrush: amt=depth, p2=rate divide
-      v[fBCC] -= 1;
-      v[fBCC] <= 0 ? (
-        v[fBCC] = 1 + floor(p2*31);
-        qz = pow(2, 15 - amt*14);
-        v[fBHL] = floor(l*qz + 0.5)/qz;
-        v[fBHR] = floor(r*qz + 0.5)/qz;
+      fx == 2 ? (
+        // granular stretch: 2 hann-windowed heads, timeline independent of pitch
+        spd = pow(4, 1 - 2*amt) * (dk_srate[dd] > 0 ? dk_srate[dd]/srate : 1);
+        glen = (0.02 + p2*0.1) * srate;
+        v[fVT] += spd;
+        v[fPA] += rt; v[fPB] += rt;
+        v[fPHA] += 1/glen; v[fPHB] += 1/glen;
+        v[fPHA] >= 1 ? ( v[fPHA] -= 1; v[fPA] = v[fVT]; );
+        v[fPHB] >= 1 ? ( v[fPHB] -= 1; v[fPB] = v[fVT]; );
+        wa = 0.5 - 0.5*cos(2*$pi*v[fPHA]);
+        wb = 0.5 - 0.5*cos(2*$pi*v[fPHB]);
+        l = readsmp(v[fPA],0)*wa + readsmp(v[fPB],0)*wb;
+        r = readsmp(v[fPA],1)*wa + readsmp(v[fPB],1)*wb;
+        v[fVT] >= v[fEND] ? v[fST] = 3;
+      ) : fx == 4 ? (
+        // FM of playback position
+        frq = 30 * pow(2, p2*7);
+        v[fPH1] += frq/srate * 2*$pi;
+        mp = v[fPOS] + sin(v[fPH1]) * amt*amt*400;
+        l = readsmp(mp,0); r = readsmp(mp,1);
+        v[fPOS] += rt;
+        v[fPOS] >= v[fEND] ? v[fST] = 3;
+      ) : (
+        l = readsmp(v[fPOS],0); r = readsmp(v[fPOS],1);
+        v[fPOS] += rt;
+        v[fPOS] >= v[fEND] ? v[fST] = 3;
       );
-      l = v[fBHL]; r = v[fBHR];
-    ) : fx == 3 ? (
-      // compressor: amt=amount, p2=release
-      ain = max(abs(l), abs(r));
-      ain > v[fCEN] ? v[fCEN] += (ain - v[fCEN])*0.15
-                    : v[fCEN] *= exp(-1/((0.03 + p2*0.5)*srate));
-      cg = v[fCEN] > 0.1 ? pow(v[fCEN]/0.1, -0.8*amt) : 1;
-      cg *= 1 + amt*2.5;
-      l *= cg; r *= cg;
-    ) : fx == 5 ? (
-      // AM/tremolo: amt=depth, p2=rate
-      frq = 0.5 * pow(2, p2*11);
-      v[fPH1] += frq/srate * 2*$pi;
-      cg = 1 - amt*(0.5 + 0.5*sin(v[fPH1]));
-      l *= cg; r *= cg;
-    ) : fx == 6 ? (
-      // ringmod: amt=mix, p2=freq
-      frq = 30 * pow(2, p2*7);
-      v[fPH1] += frq/srate * 2*$pi;
-      rm = sin(v[fPH1]);
-      l = l*(1-amt) + l*rm*amt;
-      r = r*(1-amt) + r*rm*amt;
-    ) : fx == 7 ? (
-      // saturator: amt=drive, p2=tone
-      dv = 1 + amt*24;
-      l = l*dv/(1 + abs(l*dv));
-      r = r*dv/(1 + abs(r*dv));
-      tc = 1 - exp(-2*$pi*(200 + p2*p2*18000)/srate);
-      v[fBHL] += (l - v[fBHL])*tc;
-      v[fBHR] += (r - v[fBHR])*tc;
-      l = v[fBHL]; r = v[fBHR];
-    );
 
-    v[fST] == 1 ? (
-      v[fENV] += atk_inc;
-      v[fENV] >= 1 ? ( v[fENV] = 1; v[fST] = 2; );
-    ) : v[fST] == 3 ? (
-      v[fENV] *= rel_c;
-      v[fENV] < 0.001 ? (
-        v[fA] = 0;
-        v[fONOTE] ? qpush(v);
+      fx == 1 ? (
+        // bitcrush: amt=depth, p2=rate divide
+        v[fBCC] -= 1;
+        v[fBCC] <= 0 ? (
+          v[fBCC] = 1 + floor(p2*31);
+          qz = pow(2, 15 - amt*14);
+          v[fBHL] = floor(l*qz + 0.5)/qz;
+          v[fBHR] = floor(r*qz + 0.5)/qz;
+        );
+        l = v[fBHL]; r = v[fBHR];
+      ) : fx == 3 ? (
+        // compressor: amt=amount, p2=release
+        ain = max(abs(l), abs(r));
+        ain > v[fCEN] ? v[fCEN] += (ain - v[fCEN])*0.15
+                      : v[fCEN] *= exp(-1/((0.03 + p2*0.5)*srate));
+        cg = v[fCEN] > 0.1 ? pow(v[fCEN]/0.1, -0.8*amt) : 1;
+        cg *= 1 + amt*2.5;
+        l *= cg; r *= cg;
+      ) : fx == 5 ? (
+        // AM/tremolo: amt=depth, p2=rate
+        frq = 0.5 * pow(2, p2*11);
+        v[fPH1] += frq/srate * 2*$pi;
+        cg = 1 - amt*(0.5 + 0.5*sin(v[fPH1]));
+        l *= cg; r *= cg;
+      ) : fx == 6 ? (
+        // ringmod: amt=mix, p2=freq
+        frq = 30 * pow(2, p2*7);
+        v[fPH1] += frq/srate * 2*$pi;
+        rm = sin(v[fPH1]);
+        l = l*(1-amt) + l*rm*amt;
+        r = r*(1-amt) + r*rm*amt;
+      ) : fx == 7 ? (
+        // saturator: amt=drive, p2=tone
+        dv = 1 + amt*24;
+        l = l*dv/(1 + abs(l*dv));
+        r = r*dv/(1 + abs(r*dv));
+        tc = 1 - exp(-2*$pi*(200 + p2*p2*18000)/srate);
+        v[fBHL] += (l - v[fBHL])*tc;
+        v[fBHR] += (r - v[fBHR])*tc;
+        l = v[fBHL]; r = v[fBHR];
       );
+
+      v[fST] == 1 ? (
+        v[fENV] += atk_inc;
+        v[fENV] >= 1 ? ( v[fENV] = 1; v[fST] = 2; );
+      ) : v[fST] == 3 ? (
+        v[fENV] *= rel_c;
+        v[fENV] < 0.001 ? (
+          v[fA] = 0;
+          v[fONOTE] ? qpush(v);
+        );
+      );
+      aol += l * v[fENV] * v[fGL];
+      aor += r * v[fENV] * v[fGR];
     );
-    outl += l * v[fENV] * v[fGL];
-    outr += r * v[fENV] * v[fGR];
+    vi += 1;
   );
-  vi += 1;
+  dd == 0 ? ( d_l0 = aol; d_r0 = aor; ) : ( d_l1 = aol; d_r1 = aor; );
+  dd += 1;
 );
 
-spl0 = spl0*thru + outl*mvol;
-spl1 = spl1*thru + outr*mvol;
+outmode < 0.5 ? (
+  spl0 = spl0*thru + (d_l0*xga + d_l1*xgb)*mvol;
+  spl1 = spl1*thru + (d_r0*xga + d_r1*xgb)*mvol;
+  spl2 = d_l1*xgb*mvol;
+  spl3 = d_r1*xgb*mvol;
+) : (
+  spl0 = spl0*thru + d_l0*xga*mvol;
+  spl1 = spl1*thru + d_r0*xga*mvol;
+  spl2 = d_l1*xgb*mvol;
+  spl3 = d_r1*xgb*mvol;
+);
 
 @serialize
-file_var(0, capframes);
-file_var(0, cap_srate);
-file_var(0, nsl);
-file_var(0, sel);
-file_mem(0, SLBASE, 14*64);
-srz_read = file_avail(0) >= 0;
-!srz_read ? ( audioflag = saveaudio && capframes > 0 ? 1 : 0; );
-file_var(0, audioflag);
-audioflag ? file_mem(0, BUF, capframes*2);
-srz_read ? (
-  cap_srate <= 0 ? cap_srate = srate;
-  capframes > 0 ? ( task = 3; ov_i = 0; );  // rebuild overview chunked in @gfx
+srz_ver = 2;
+file_var(0, srz_ver);
+file_var(0, cur);
+file_mem(0, 3200, 16);  // per-deck scalars: frames, srate, nsl, sel
+srz_d = 0;
+while (srz_d < 2) (
+  srz_sb = slb(srz_d);
+  file_mem(0, srz_sb, 14*64);
+  file_avail(0) < 0 ? ( srz_aud = saveaudio && dk_frames[srz_d] > 0 ? 1 : 0; );
+  file_var(0, srz_aud);
+  srz_b = dbuf(srz_d);
+  srz_aud ? file_mem(0, srz_b, dk_frames[srz_d]*2);
+  srz_d += 1;
+);
+file_mem(0, PRE, 16*1024);
+file_avail(0) >= 0 ? (
+  dk_srate[0] <= 0 ? dk_srate[0] = srate;
+  dk_srate[1] <= 0 ? dk_srate[1] = srate;
+  (dk_frames[0] > 0 || dk_frames[1] > 0) ? ( task = 3; ov_d = 0; ov_i = 0; );
 );
 
-@gfx 760 480
+@gfx 760 560
 
 function fxname(i dst) (
   i==0 ? strcpy(dst,"OFF") : i==1 ? strcpy(dst,"CRUSH") : i==2 ? strcpy(dst,"STRETCH") :
@@ -481,8 +563,8 @@ function btn(x y w h lab on) local(hit r) (
   gfx_set(0.5,0.52,0.55,1);
   gfx_rect(x,y,w,1); gfx_rect(x,y+h-1,w,1); gfx_rect(x,y,1,h); gfx_rect(x+w-1,y,1,h);
   gfx_set(0.92,0.93,0.94,1);
-  gfx_measurestr(lab, tw, th);
-  gfx_x = x + (w-tw)/2; gfx_y = y + (h-th)/2;
+  gfx_measurestr(lab, btw, bth);
+  gfx_x = x + (w-btw)/2; gfx_y = y + (h-bth)/2;
   gfx_drawstr(lab);
   r = hit && lclick;
   r;
@@ -521,9 +603,7 @@ function ufield(id x y w h lo hi def isenum val lab disp) local(hit nv tw th) (
 gfx_setfont(1, "Arial", 12);
 W = gfx_w; H = gfx_h;
 
-// click edges + double-click
 lclick = (mouse_cap & 1) && !(last_cap & 1);
-lrelease = !(mouse_cap & 1) && (last_cap & 1);
 rclick = (mouse_cap & 2) && !(last_cap & 2);
 dbl = 0;
 lclick ? (
@@ -533,53 +613,58 @@ lclick ? (
 );
 
 // ------- background chunked tasks (detect / classify / overview) -------
-task == 1 ? ( // transient detect
+task == 1 ? ( // transient detect on deck tsk_d
   det_new ? (
-    det_new = 0; nsl = 0;
+    det_new = 0;
+    dk_nsl[tsk_d] = 0;
+    tk_buf = dbuf(tsk_d);
+    tk_sb = slb(tsk_d);
     det_i = 0; det_env = 0; det_slow = 0.001;
     det_last = -srate;
-    det_gap = floor(0.05 * cap_srate);
-    det_fast = exp(-1/(0.003*cap_srate));
-    det_slowc = 1 - exp(-1/(0.08*cap_srate));
+    det_gap = floor(0.05 * dk_srate[tsk_d]);
+    det_fast = exp(-1/(0.003*dk_srate[tsk_d]));
+    det_slowc = 1 - exp(-1/(0.08*dk_srate[tsk_d]));
     det_thr = 1.2 + (1 - sens) * 6;
   );
-  det_n = min(det_i + 262144, capframes);
+  det_n = min(det_i + 262144, dk_frames[tsk_d]);
   while (det_i < det_n) (
-    dx = abs(BUF[det_i*2]) + abs(BUF[det_i*2+1]);
+    dx = abs(tk_buf[det_i*2]) + abs(tk_buf[det_i*2+1]);
     det_env = max(dx, det_env * det_fast);
     det_slow += (det_env - det_slow) * det_slowc;
     (det_env > det_slow * det_thr && det_env > 0.01 &&
-     det_i - det_last > det_gap && nsl < MAXSL) ? (
-      sl_start[nsl] = max(0, det_i - 32);
-      slice_defaults(nsl);
-      nsl += 1;
+     det_i - det_last > det_gap && dk_nsl[tsk_d] < MAXSL) ? (
+      tk_sb[OF_START+dk_nsl[tsk_d]] = max(0, det_i - 32);
+      slice_defaults(tsk_d, dk_nsl[tsk_d]);
+      dk_nsl[tsk_d] += 1;
       det_last = det_i;
       det_slow = det_env;
     );
     det_i += 1;
   );
-  det_i >= capframes ? (
-    calc_ends();
-    sel = nsl > 0 ? 0 : -1;
+  det_i >= dk_frames[tsk_d] ? (
+    calc_ends(tsk_d);
+    dk_sel[tsk_d] = dk_nsl[tsk_d] > 0 ? 0 : -1;
     task = 0;
   );
-) : task == 2 ? ( // classify slices
+) : task == 2 ? ( // classify slices on deck tsk_d
   cls_new ? (
     cls_new = 0; cls_s = 0; cls_inslice = 0;
+    tk_buf = dbuf(tsk_d);
+    tk_sb = slb(tsk_d);
   );
-  cls_s >= nsl ? task = 0 : (
+  cls_s >= dk_nsl[tsk_d] ? task = 0 : (
     !cls_inslice ? (
       cls_inslice = 1;
-      cls_i = sl_start[cls_s];
+      cls_i = tk_sb[OF_START+cls_s];
       cls_lp = 0; cls_lp2 = 0;
       cls_el = 0; cls_eh = 0; cls_et = 1e-9;
-      cls_peak = 1e-9; cls_lastloud = sl_start[cls_s];
-      cls_klo = 1 - exp(-2*$pi*180/cap_srate);
-      cls_khi = 1 - exp(-2*$pi*4500/cap_srate);
+      cls_peak = 1e-9; cls_lastloud = cls_i;
+      cls_klo = 1 - exp(-2*$pi*180/dk_srate[tsk_d]);
+      cls_khi = 1 - exp(-2*$pi*4500/dk_srate[tsk_d]);
     );
-    cls_n = min(cls_i + 262144, sl_end[cls_s]);
+    cls_n = min(cls_i + 262144, tk_sb[OF_END+cls_s]);
     while (cls_i < cls_n) (
-      cmm = (BUF[cls_i*2] + BUF[cls_i*2+1]) * 0.5;
+      cmm = (tk_buf[cls_i*2] + tk_buf[cls_i*2+1]) * 0.5;
       cls_lp += (cmm - cls_lp) * cls_klo;
       cls_lp2 += (cmm - cls_lp2) * cls_khi;
       chh = cmm - cls_lp2;
@@ -591,79 +676,97 @@ task == 1 ? ( // transient detect
       caa > cls_peak * 0.05 ? cls_lastloud = cls_i;
       cls_i += 1;
     );
-    cls_i >= sl_end[cls_s] ? (
+    cls_i >= tk_sb[OF_END+cls_s] ? (
       rl = cls_el / cls_et;
       rh = cls_eh / cls_et;
-      dlen = (cls_lastloud - sl_start[cls_s]) / cap_srate;
+      dlen = (cls_lastloud - tk_sb[OF_START+cls_s]) / dk_srate[tsk_d];
       cc = rl > 0.4 ? 1 :
            (rh > 0.45 && dlen < 0.18) ? 3 :
            (rh > 0.35 && dlen > 0.35) ? 5 :
            (rh < 0.45 && rl < 0.4 && dlen < 0.45) ? 2 : 4;
-      sl_class[cls_s] = cc;
-      cc == 3 ? sl_choke[cls_s] = 1;  // hats auto-choke
+      tk_sb[OF_CLASS+cls_s] = cc;
+      cc == 3 ? tk_sb[OF_CHOKE+cls_s] = 1;  // hats auto-choke
       cls_inslice = 0;
       cls_s += 1;
     );
   );
-) : task == 3 ? ( // rebuild overview after project load
-  ov_n = min(ov_i + 262144, capframes);
-  while (ov_i < ov_n) (
-    (ov_i & (BINSZ-1)) == 0 ? ( ovmin = 1; ovmax = -1; );
-    cmm = (BUF[ov_i*2] + BUF[ov_i*2+1]) * 0.5;
-    cmm > ovmax ? ovmax = cmm;
-    cmm < ovmin ? ovmin = cmm;
-    ((ov_i & (BINSZ-1)) == (BINSZ-1) || ov_i == capframes-1) ? (
-      OVW[floor(ov_i/BINSZ)*2] = ovmin;
-      OVW[floor(ov_i/BINSZ)*2+1] = ovmax;
+) : task == 3 ? ( // rebuild overviews after project load
+  ov_d > 1 ? task = 0 : (
+    dk_frames[ov_d] <= 0 ? ( ov_d += 1; ov_i = 0; ) : (
+      tk_buf = dbuf(ov_d);
+      tk_ovb = OVW0 + ov_d*65536;
+      ov_n = min(ov_i + 262144, dk_frames[ov_d]);
+      while (ov_i < ov_n) (
+        (ov_i & (BINSZ-1)) == 0 ? ( ovmin = 1; ovmax = -1; );
+        cmm = (tk_buf[ov_i*2] + tk_buf[ov_i*2+1]) * 0.5;
+        cmm > ovmax ? ovmax = cmm;
+        cmm < ovmin ? ovmin = cmm;
+        ((ov_i & (BINSZ-1)) == (BINSZ-1) || ov_i == dk_frames[ov_d]-1) ? (
+          tk_ovb[floor(ov_i/BINSZ)*2] = ovmin;
+          tk_ovb[floor(ov_i/BINSZ)*2+1] = ovmax;
+        );
+        ov_i += 1;
+      );
+      ov_i >= dk_frames[ov_d] ? ( ov_d += 1; ov_i = 0; );
     );
-    ov_i += 1;
   );
-  ov_i >= capframes ? task = 0;
 );
 
 // ---------------- layout ----------------
-TBH = 26;
-WX = 8; WY = TBH + 6;
+WX = 8;
 WW = W - 16;
-WH = max(90, floor(H * 0.36));
+WY = 58;
+WH = max(80, floor(H * 0.30));
 PY = WY + WH + 8;
 padw = floor(WW / 16);
 padh = 26;
 PH = padh*4 + 6;
 PRY = PY + PH + 8;
+gsel = dk_sel[cur];
+gsb = slb(cur);
+gfr = dk_frames[cur];
+govw = OVW0 + cur*65536;
 
 gfx_set(0.12,0.125,0.13,1);
 gfx_rect(0,0,W,H);
 
-// ---------------- toolbar ----------------
+// ---------------- toolbar row 1: decks + transport ----------------
 bx = 8;
-btn(bx, 2, 74, 22, "CAPTURE", armed || capturing) ? (
-  armed || capturing ? (
-    capturing ? finish_capture() : armed = 0;
-  ) : (
-    armed = 1;
+btn(bx, 2, 30, 22, "A", cur == 0) ? ( cur = 0; );
+bx += 32;
+btn(bx, 2, 30, 22, "B", cur == 1) ? ( cur = 1; );
+bx += 40;
+btn(bx, 2, 46, 22, "REC", capturing) ? (
+  capturing ? finish_capture() : (
+    task == 0 ? ( rec_d = cur; armed = 1; capturing = 1; wr = 0; binmin = 1; binmax = -1; );
   );
 );
-bx += 80;
-btn(bx, 2, 64, 22, "DETECT", task == 1) && capframes > 0 && task == 0 ? ( task = 1; det_new = 1; );
-bx += 70;
-btn(bx, 2, 70, 22, "CLASSIFY", task == 2) && nsl > 0 && task == 0 ? ( task = 2; cls_new = 1; );
-bx += 76;
-btn(bx, 2, 56, 22, "CLEAR", 0) ? ( nsl = 0; sel = -1; );
-bx += 62;
-btn(bx, 2, 78, 22, "MARKERS", 0) && gmem[0] == MAGIC ? import_markers();
-bx += 84;
+bx += 52;
+btn(bx, 2, 52, 22, "ARM", armed && !capturing) ? (
+  armed && !capturing ? armed = 0 : (
+    task == 0 && !capturing ? ( rec_d = cur; armed = 1; );
+  );
+);
+bx += 58;
+btn(bx, 2, 62, 22, "DETECT", task == 1) && gfr > 0 && task == 0 ? ( task = 1; tsk_d = cur; det_new = 1; );
+bx += 68;
+btn(bx, 2, 68, 22, "CLASSIFY", task == 2) && dk_nsl[cur] > 0 && task == 0 ? ( task = 2; tsk_d = cur; cls_new = 1; );
+bx += 74;
+btn(bx, 2, 52, 22, "CLEAR", 0) ? ( dk_nsl[cur] = 0; dk_sel[cur] = -1; );
+bx += 58;
+btn(bx, 2, 72, 22, "MARKERS", 0) && gmem[0] == MAGIC ? import_markers(cur);
+bx += 78;
 
 gfx_set(0.55,0.58,0.62,1);
-gfx_x = bx + 6; gfx_y = 7;
-capframes > 0 ? (
-  sprintf(#info, "%d Hz  %.2fs  %d slices", cap_srate, capframes/max(cap_srate,1), nsl);
-) : capturing ? (
-  sprintf(#info, "recording... %.2fs", wr/srate);
+gfx_x = bx + 4; gfx_y = 7;
+capturing ? (
+  sprintf(#info, "REC %s %.2fs", rec_d ? "B" : "A", wr/srate);
 ) : armed ? (
-  strcpy(#info, "armed - play the item or feed audio");
+  sprintf(#info, "armed %s - waiting for audio/transport", rec_d ? "B" : "A");
+) : gfr > 0 ? (
+  sprintf(#info, "%s: %d Hz  %.2fs  %d slices", cur ? "B" : "A", dk_srate[cur], gfr/max(dk_srate[cur],1), dk_nsl[cur]);
 ) : (
-  strcpy(#info, "no audio - press CAPTURE, then play the item");
+  sprintf(#info, "%s: empty - REC (instant) or ARM (wait for playback)", cur ? "B" : "A");
 );
 gfx_drawstr(#info);
 
@@ -673,17 +776,68 @@ midi_act ? (
   midi_act = 0;
 );
 
-// ---------------- waveform ----------------
+// ---------------- toolbar row 2: presets + out mode + crossfader ----------------
+gfx_set(0.55,0.58,0.62,1);
+gfx_x = 8; gfx_y = 33;
+gfx_drawstr("PRESET");
+psx = 58;
+gpi = 0;
+while (gpi < 8) (
+  ppx = psx + gpi*24;
+  ppp = PRE + (cur*8+gpi)*1024;
+  pflag = ppp[0];
+  phit = mouse_x >= ppx && mouse_x < ppx+22 && mouse_y >= 28 && mouse_y < 50;
+  pflag ? gfx_set(0.30,0.42,0.34,1) : gfx_set(0.20,0.22,0.25,1);
+  phit ? gfx_set(0.36,0.40,0.46,1);
+  gfx_rect(ppx, 28, 22, 22);
+  gfx_set(0.5,0.52,0.55,1);
+  gfx_rect(ppx,28,22,1); gfx_rect(ppx,49,22,1); gfx_rect(ppx,28,1,22); gfx_rect(ppx+21,28,1,22);
+  gfx_set(0.9,0.91,0.92,1);
+  gfx_x = ppx+7; gfx_y = 32;
+  sprintf(#pn, "%d", gpi+1);
+  gfx_drawstr(#pn);
+  phit && lclick ? (
+    (mouse_cap & 8) ? preset_save(cur, gpi) :
+    (mouse_cap & 16) ? preset_clear(cur, gpi) :
+    preset_load(cur, gpi);
+  );
+  gpi += 1;
+);
+psx += 8*24 + 10;
+btn(psx, 28, 76, 22, outmode < 0.5 ? "OUT: MIX" : "OUT: SPLIT", 0) ? outmode = !outmode;
+psx += 84;
+
+// crossfader
+xfx = psx + 16; xfw = W - xfx - 24;
+xfw > 60 ? (
+  gfx_set(0.55,0.58,0.62,1);
+  gfx_x = psx; gfx_y = 33; gfx_drawstr("A");
+  gfx_x = xfx + xfw + 6; gfx_y = 33; gfx_drawstr("B");
+  gfx_set(0.20,0.22,0.25,1);
+  gfx_rect(xfx, 34, xfw, 10);
+  gfx_set(0.5,0.52,0.55,1);
+  gfx_rect(xfx,34,xfw,1); gfx_rect(xfx,43,xfw,1);
+  hx = xfx + xfade*xfw;
+  gfx_set(0.9,0.75,0.35,1);
+  gfx_rect(hx-4, 29, 8, 20);
+  (lclick && mouse_x >= xfx-6 && mouse_x < xfx+xfw+6 && mouse_y >= 27 && mouse_y < 51) ? xf_drag = 1;
+  xf_drag && (mouse_cap & 1) ? (
+    xfade = min(1, max(0, (mouse_x - xfx)/xfw));
+    dbl ? xfade = 0.5;
+  );
+  xf_drag && !(mouse_cap & 1) ? xf_drag = 0;
+);
+
+// ---------------- waveform (current deck) ----------------
 gfx_set(0.16,0.165,0.175,1);
 gfx_rect(WX, WY, WW, WH);
 
-fr_show = capturing ? wr : capframes;
+fr_show = (capturing && rec_d == cur) ? wr : gfr;
 fr_show > 0 ? (
   wmid = WY + WH/2;
-  // slice background tint for selected
-  sel >= 0 && sel < nsl ? (
-    x0 = WX + sl_start[sel]/fr_show * WW;
-    x1 = WX + sl_end[sel]/fr_show * WW;
+  gsel >= 0 && gsel < dk_nsl[cur] ? (
+    x0 = WX + gsb[OF_START+gsel]/fr_show * WW;
+    x1 = WX + gsb[OF_END+gsel]/fr_show * WW;
     gfx_set(0.25,0.30,0.38,0.45);
     gfx_rect(x0, WY, max(1, x1-x0), WH);
   );
@@ -696,8 +850,8 @@ fr_show > 0 ? (
     pmn = 1; pmx = -1;
     bb = b0;
     while (bb < b1) (
-      OVW[bb*2] < pmn ? pmn = OVW[bb*2];
-      OVW[bb*2+1] > pmx ? pmx = OVW[bb*2+1];
+      govw[bb*2] < pmn ? pmn = govw[bb*2];
+      govw[bb*2+1] > pmx ? pmx = govw[bb*2+1];
       bb += 1;
     );
     pmx >= pmn ? (
@@ -709,12 +863,12 @@ fr_show > 0 ? (
   );
   // slice markers
   gsi = 0;
-  while (gsi < nsl) (
-    gmx = WX + sl_start[gsi]/fr_show * WW;
-    classcol(sl_class[gsi]);
+  while (gsi < dk_nsl[cur]) (
+    gmx = WX + gsb[OF_START+gsi]/fr_show * WW;
+    classcol(gsb[OF_CLASS+gsi]);
     gfx_line(gmx, WY, gmx, WY+WH);
     gfx_triangle(gmx, WY, gmx+7, WY, gmx, WY+9);
-    gsi == sel ? (
+    gsi == gsel ? (
       gfx_set(1,1,1,0.9);
       gfx_line(gmx+1, WY, gmx+1, WY+WH);
     );
@@ -727,9 +881,9 @@ fr_show > 0 ? (
   // voice playheads
   gvi = 0;
   while (gvi < NVOICE) (
-    gv = voices + gvi*VF;
+    gv = V0 + cur*1024 + gvi*VF;
     gv[fA] ? (
-      php = sl_fx[gv[fS]] == 2 ? gv[fVT] : gv[fPOS];
+      php = gsb[OF_FX+gv[fS]] == 2 ? gv[fVT] : gv[fPOS];
       gpx = WX + php/fr_show * WW;
       gfx_set(1,1,1,0.35 + 0.5*gv[fENV]);
       gfx_line(gpx, WY, gpx, WY+WH);
@@ -742,60 +896,58 @@ fr_show > 0 ? (
 m_inwave = mouse_x >= WX && mouse_x < WX+WW && mouse_y >= WY && mouse_y < WY+WH;
 m_fr = (mouse_x - WX) / WW * max(fr_show,1);
 m_inwave && lclick && fr_show > 0 && !capturing ? (
-  // find nearest marker within 6 px
   hitm = -1; gsi = 0;
-  while (gsi < nsl) (
-    abs(WX + sl_start[gsi]/fr_show*WW - mouse_x) <= 6 ? hitm = gsi;
+  while (gsi < dk_nsl[cur]) (
+    abs(WX + gsb[OF_START+gsi]/fr_show*WW - mouse_x) <= 6 ? hitm = gsi;
     gsi += 1;
   );
   (mouse_cap & 16) && hitm >= 0 ? (      // alt+click = delete
-    del_slice(hitm);
+    del_slice(cur, hitm);
   ) : dbl ? (
-    add_slice(m_fr);
+    add_slice(cur, m_fr);
   ) : hitm >= 0 ? (
-    drag_marker = hitm+1; sel = hitm;
+    drag_marker = hitm+1; dk_sel[cur] = hitm;
   ) : (
-    // select slice under cursor
     gsi = 0;
-    while (gsi < nsl) (
-      sl_start[gsi] <= m_fr ? sel = gsi;
+    while (gsi < dk_nsl[cur]) (
+      gsb[OF_START+gsi] <= m_fr ? dk_sel[cur] = gsi;
       gsi += 1;
     );
   );
 );
 rclick && m_inwave && fr_show > 0 ? (
   hitm = -1; gsi = 0;
-  while (gsi < nsl) (
-    abs(WX + sl_start[gsi]/fr_show*WW - mouse_x) <= 6 ? hitm = gsi;
+  while (gsi < dk_nsl[cur]) (
+    abs(WX + gsb[OF_START+gsi]/fr_show*WW - mouse_x) <= 6 ? hitm = gsi;
     gsi += 1;
   );
-  hitm >= 0 ? del_slice(hitm);
+  hitm >= 0 ? del_slice(cur, hitm);
 );
 drag_marker > 0 && (mouse_cap & 1) ? (
   di = drag_marker - 1;
-  dlo = di > 0 ? sl_start[di-1] + 64 : 0;
-  dhi = di < nsl-1 ? sl_start[di+1] - 64 : capframes - 64;
-  sl_start[di] = max(dlo, min(dhi, floor(m_fr)));
-  calc_ends();
+  dlo = di > 0 ? gsb[OF_START+di-1] + 64 : 0;
+  dhi = di < dk_nsl[cur]-1 ? gsb[OF_START+di+1] - 64 : gfr - 64;
+  gsb[OF_START+di] = max(dlo, min(dhi, floor(m_fr)));
+  calc_ends(cur);
 );
 drag_marker > 0 && !(mouse_cap & 1) ? drag_marker = 0;
 
-// ---------------- pads ----------------
+// ---------------- pads (current deck) ----------------
+gbase = cur ? basenote_b : basenote_a;
 gpi = 0;
 while (gpi < MAXSL) (
   prow = floor(gpi/16); pcol = gpi % 16;
   gpx = WX + pcol*padw; gpy = PY + prow*(padh+2);
-  gpi < nsl ? (
-    classcol(sl_class[gpi]);
-    gpi == sel ? gfx_a = 1 : gfx_a = 0.55;
+  gpi < dk_nsl[cur] ? (
+    classcol(gsb[OF_CLASS+gpi]);
+    gpi == gsel ? gfx_a = 1 : gfx_a = 0.55;
     gfx_rect(gpx, gpy, padw-2, padh);
-    // per-pad playhead
     gvi = 0;
     while (gvi < NVOICE) (
-      gv = voices + gvi*VF;
+      gv = V0 + cur*1024 + gvi*VF;
       gv[fA] && gv[fS] == gpi ? (
-        php = sl_fx[gpi] == 2 ? gv[fVT] : gv[fPOS];
-        prg = (php - sl_start[gpi]) / max(1, sl_end[gpi] - sl_start[gpi]);
+        php = gsb[OF_FX+gpi] == 2 ? gv[fVT] : gv[fPOS];
+        prg = (php - gsb[OF_START+gpi]) / max(1, gsb[OF_END+gpi] - gsb[OF_START+gpi]);
         gfx_set(1,1,1,0.9);
         gfx_rect(gpx, gpy + padh - 3, max(1,(padw-2) * min(1,prg)), 3);
       );
@@ -806,11 +958,11 @@ while (gpi < MAXSL) (
     sprintf(#pn, "%d", gpi+1);
     gfx_drawstr(#pn);
     gfx_x = gpx+3; gfx_y = gpy+padh-14;
-    sprintf(#pn, "%d", basenote+gpi);
+    sprintf(#pn, "%d", gbase+gpi);
     gfx_drawstr(#pn);
-    // click = select + preview
     lclick && mouse_x >= gpx && mouse_x < gpx+padw-2 && mouse_y >= gpy && mouse_y < gpy+padh ? (
-      sel = gpi;
+      dk_sel[cur] = gpi;
+      pv_deck = cur;
       pv_req = gpi;
     );
   ) : (
@@ -821,48 +973,49 @@ while (gpi < MAXSL) (
 );
 
 // ---------------- selected slice params ----------------
-sel >= 0 && sel < nsl ? (
+gsel = dk_sel[cur];
+gsel >= 0 && gsel < dk_nsl[cur] ? (
   fw = floor((WW - 10) / 6);
   fh = 30;
   fy = PRY;
   fx0 = WX;
 
-  sprintf(#d, "%.1f st", sl_pitch[sel]);
-  sl_pitch[sel] = ufield(1, fx0, fy, fw-4, fh, -24, 24, 0, 0, sl_pitch[sel], "PITCH", #d);
-  sprintf(#d, "%.1f dB", sl_gain[sel]);
-  sl_gain[sel] = ufield(2, fx0+fw, fy, fw-4, fh, -24, 12, 0, 0, sl_gain[sel], "GAIN", #d);
-  sprintf(#d, "%d", floor(sl_pan[sel]*100+0.5));
-  sl_pan[sel] = ufield(3, fx0+fw*2, fy, fw-4, fh, -1, 1, 0, 0, sl_pan[sel], "PAN", #d);
-  fxname(sl_fx[sel], #d);
-  sl_fx[sel] = ufield(4, fx0+fw*3, fy, fw-4, fh, 0, 7, 0, 1, sl_fx[sel], "FX", #d);
-  sprintf(#d, "%d%%", floor(sl_amt[sel]*100+0.5));
-  sl_amt[sel] = ufield(5, fx0+fw*4, fy, fw-4, fh, 0, 1, 0.5, 0, sl_amt[sel], "AMT", #d);
-  sprintf(#d, "%d%%", floor(sl_p2[sel]*100+0.5));
-  sl_p2[sel] = ufield(6, fx0+fw*5, fy, fw-4, fh, 0, 1, 0.5, 0, sl_p2[sel], "P2", #d);
+  sprintf(#d, "%.1f st", gsb[OF_PITCH+gsel]);
+  gsb[OF_PITCH+gsel] = ufield(1, fx0, fy, fw-4, fh, -24, 24, 0, 0, gsb[OF_PITCH+gsel], "PITCH", #d);
+  sprintf(#d, "%.1f dB", gsb[OF_GAIN+gsel]);
+  gsb[OF_GAIN+gsel] = ufield(2, fx0+fw, fy, fw-4, fh, -24, 12, 0, 0, gsb[OF_GAIN+gsel], "GAIN", #d);
+  sprintf(#d, "%d", floor(gsb[OF_PAN+gsel]*100+0.5));
+  gsb[OF_PAN+gsel] = ufield(3, fx0+fw*2, fy, fw-4, fh, -1, 1, 0, 0, gsb[OF_PAN+gsel], "PAN", #d);
+  fxname(gsb[OF_FX+gsel], #d);
+  gsb[OF_FX+gsel] = ufield(4, fx0+fw*3, fy, fw-4, fh, 0, 7, 0, 1, gsb[OF_FX+gsel], "FX", #d);
+  sprintf(#d, "%d%%", floor(gsb[OF_AMT+gsel]*100+0.5));
+  gsb[OF_AMT+gsel] = ufield(5, fx0+fw*4, fy, fw-4, fh, 0, 1, 0.5, 0, gsb[OF_AMT+gsel], "AMT", #d);
+  sprintf(#d, "%d%%", floor(gsb[OF_P2+gsel]*100+0.5));
+  gsb[OF_P2+gsel] = ufield(6, fx0+fw*5, fy, fw-4, fh, 0, 1, 0.5, 0, gsb[OF_P2+gsel], "P2", #d);
 
   fy += fh + 4;
-  classname(sl_class[sel], #d);
-  sl_class[sel] = ufield(7, fx0, fy, fw-4, fh, 0, 5, 0, 1, sl_class[sel], "CLASS", #d);
-  sprintf(#d, "%d", sl_choke[sel]);
-  sl_choke[sel] = floor(ufield(8, fx0+fw, fy, fw-4, fh, 0, 4, 0, 1, sl_choke[sel], "CHOKE", #d)+0.5);
-  moutname(sl_mout[sel], #d);
-  sl_mout[sel] = ufield(9, fx0+fw*2, fy, fw-4, fh, 0, 2, 0, 1, sl_mout[sel], "MIDI OUT", #d);
-  sprintf(#d, "%d", floor(sl_mnum[sel]+0.5));
-  sl_mnum[sel] = floor(ufield(10, fx0+fw*3, fy, fw-4, fh, 0, 127, 36, 0, sl_mnum[sel], "NUM", #d)+0.5);
-  sprintf(#d, "%d", floor(sl_mchan[sel]+0.5)+1);
-  sl_mchan[sel] = floor(ufield(11, fx0+fw*4, fy, fw-4, fh, 0, 15, 0, 0, sl_mchan[sel], "CHAN", #d)+0.5);
-  sprintf(#d, "%d", floor(sl_mbus[sel]+0.5)+1);
-  sl_mbus[sel] = floor(ufield(12, fx0+fw*5, fy, fw-4, fh, 0, 15, 0, 0, sl_mbus[sel], "BUS", #d)+0.5);
+  classname(gsb[OF_CLASS+gsel], #d);
+  gsb[OF_CLASS+gsel] = ufield(7, fx0, fy, fw-4, fh, 0, 5, 0, 1, gsb[OF_CLASS+gsel], "CLASS", #d);
+  sprintf(#d, "%d", gsb[OF_CHOKE+gsel]);
+  gsb[OF_CHOKE+gsel] = floor(ufield(8, fx0+fw, fy, fw-4, fh, 0, 4, 0, 1, gsb[OF_CHOKE+gsel], "CHOKE", #d)+0.5);
+  moutname(gsb[OF_MOUT+gsel], #d);
+  gsb[OF_MOUT+gsel] = ufield(9, fx0+fw*2, fy, fw-4, fh, 0, 2, 0, 1, gsb[OF_MOUT+gsel], "MIDI OUT", #d);
+  sprintf(#d, "%d", floor(gsb[OF_MNUM+gsel]+0.5));
+  gsb[OF_MNUM+gsel] = floor(ufield(10, fx0+fw*3, fy, fw-4, fh, 0, 127, 36, 0, gsb[OF_MNUM+gsel], "NUM", #d)+0.5);
+  sprintf(#d, "%d", floor(gsb[OF_MCHAN+gsel]+0.5)+1);
+  gsb[OF_MCHAN+gsel] = floor(ufield(11, fx0+fw*4, fy, fw-4, fh, 0, 15, 0, 0, gsb[OF_MCHAN+gsel], "CHAN", #d)+0.5);
+  sprintf(#d, "%d", floor(gsb[OF_MBUS+gsel]+0.5)+1);
+  gsb[OF_MBUS+gsel] = floor(ufield(12, fx0+fw*5, fy, fw-4, fh, 0, 15, 0, 0, gsb[OF_MBUS+gsel], "BUS", #d)+0.5);
 ) : (
   gfx_set(0.4,0.42,0.45,1);
   gfx_x = WX; gfx_y = PRY + 8;
-  gfx_drawstr("no slice selected - capture audio, then DETECT or double-click the waveform");
+  gfx_drawstr("no slice selected - record into this deck, then DETECT or double-click the waveform");
 );
 
 // ---------------- footer: global playback fields ----------------
 fy2 = PRY + 30*2 + 12;
-fy2 + 30 < H ? (
-  fw2 = floor((WW - 10) / 6);
+fy2 + 26 < H - 16 ? (
+  fw2 = floor((WW - 10) / 7);
   strcpy(#d, monomode ? "MONO" : "POLY");
   monomode = ufield(20, WX, fy2, fw2-4, 26, 0, 1, 0, 1, monomode, "VOICES", #d);
   strcpy(#d, legato ? "ON" : "OFF");
@@ -873,13 +1026,24 @@ fy2 + 30 < H ? (
   interp = ufield(23, WX+fw2*3, fy2, fw2-4, 26, 0, 2, 2, 1, interp, "INTERP", #d);
   strcpy(#d, gatemode ? "GATE" : "1-SHOT");
   gatemode = ufield(24, WX+fw2*4, fy2, fw2-4, 26, 0, 1, 0, 1, gatemode, "TRIG", #d);
-  sprintf(#d, "%d", floor(basenote+0.5));
-  basenote = floor(ufield(25, WX+fw2*5, fy2, fw2-4, 26, 0, 96, 36, 0, basenote, "BASE NOTE", #d)+0.5);
+  cur ? (
+    sprintf(#d, "%d", floor(basenote_b+0.5));
+    basenote_b = floor(ufield(25, WX+fw2*5, fy2, fw2-4, 26, 0, 127, 84, 0, basenote_b, "BASE B", #d)+0.5);
+    gmch = mchb;
+    gmch < 0.5 ? strcpy(#d, "OMNI") : sprintf(#d, "%d", floor(gmch+0.5));
+    mchb = floor(ufield(26, WX+fw2*6, fy2, fw2-4, 26, 0, 16, 0, 1, mchb, "CH B", #d)+0.5);
+  ) : (
+    sprintf(#d, "%d", floor(basenote_a+0.5));
+    basenote_a = floor(ufield(25, WX+fw2*5, fy2, fw2-4, 26, 0, 127, 36, 0, basenote_a, "BASE A", #d)+0.5);
+    gmch = mcha;
+    gmch < 0.5 ? strcpy(#d, "OMNI") : sprintf(#d, "%d", floor(gmch+0.5));
+    mcha = floor(ufield(26, WX+fw2*6, fy2, fw2-4, 26, 0, 16, 0, 1, mcha, "CH A", #d)+0.5);
+  );
 );
 
 gfx_set(0.38,0.40,0.43,1);
 gfx_x = WX; gfx_y = H - 15;
-gfx_drawstr("wave: click=select  dblclick=add  drag=move  alt/right-click=del  |  pads: click=preview  |  markers: run jf_slixer_push_markers.lua");
+gfx_drawstr("wave: click=sel dbl=add drag=move alt/rclick=del | pads: click=preview | preset: click=load shift=save alt=clear | markers: lua bridge");
 
 task ? (
   gfx_set(0.9,0.8,0.3,1);
