@@ -21,6 +21,7 @@ slider13:outmode=0<0,1,1{Mix on 1/2,Split A:1/2 B:3/4}>Output routing
 slider14:basenote_b=84<0,127,1>Deck B base note
 slider15:mcha=0<0,16,1>Deck A MIDI channel (0=omni)
 slider16:mchb=0<0,16,1>Deck B MIDI channel (0=omni)
+slider17:preroll_ms=5<0,100,1>Slice pre-roll (ms)
 
 in_pin:left
 in_pin:right
@@ -48,8 +49,9 @@ dk_sel    = 3212;
 SL0     = 4096;               // slice tables: deck stride 1024, field stride 64
 V0      = 8192;               // voices: deck stride 1024 (16 * 32)
 PRE     = 16384;              // presets: 16 slots (2 decks * 8) * 1024
-OVW0    = 65536;              // overview bins: deck stride 65536
-BUF0    = 262144;             // audio: stereo interleaved, deck stride below
+OVW0    = 65536;              // overview bins: 5 words/bin (min,max,elo,emid,ehi)
+OVWST   = 172032;             // per-deck overview stride
+BUF0    = 409600;             // audio: stereo interleaved, deck stride below
 DECKW   = (33554432 - BUF0) / 2;
 DECKFR  = DECKW / 2;
 
@@ -71,6 +73,7 @@ fPH1=18; fCEN=19; fEND=20; fVEL=21; fONOTE=22; fOCH=23; fOBUS=24;
   pv_req = -1; pv_deck = 0;
   fld_active = -1;
   task = 0;
+  auto_det = 1;
 );
 
 function slb(d) ( SL0 + d*1024 );
@@ -311,11 +314,12 @@ function finish_capture() local(b ob) (
   dk_srate[rec_d] = srate;
   wr > 0 && (wr & (BINSZ-1)) ? (
     b = floor(wr/BINSZ);
-    ob = OVW0 + rec_d*65536;
-    ob[b*2] = binmin;
-    ob[b*2+1] = binmax;
+    ob = OVW0 + rec_d*OVWST + b*5;
+    ob[0] = binmin; ob[1] = binmax;
+    ob[2] = belo; ob[3] = bemid; ob[4] = behi;
   );
   dk_nsl[rec_d] > 0 ? calc_ends(rec_d);
+  wr > 0 && auto_det ? ( auto_det_req = 1; auto_det_d = rec_d; );
 );
 
 @slider
@@ -325,6 +329,8 @@ mvol = pow(10, mgain_db/20);
 gcoef = glide_ms <= 0 ? 1 : 1 - exp(-1/(glide_ms * 0.001 * srate));
 atk_inc = 1 / max(1, 0.0015*srate);
 rel_c = exp(-1/(0.004*srate));
+klo_rec = 1 - exp(-2*$pi*200/srate);
+khi_rec = 1 - exp(-2*$pi*4000/srate);
 xga = cos(xfade * $pi * 0.5);
 xgb = sin(xfade * $pi * 0.5);
 
@@ -369,6 +375,8 @@ armed ? (
     (play_state & 1) || (abs(spl0) + abs(spl1) > 0.001) ? (
       capturing = 1; wr = 0;
       binmin = 1; binmax = -1;
+      belo = 0; bemid = 0; behi = 0;
+      rec_lp = 0; rec_lp2 = 0;
     );
   );
   capturing ? (
@@ -379,11 +387,17 @@ armed ? (
       cm = (spl0 + spl1) * 0.5;
       cm > binmax ? binmax = cm;
       cm < binmin ? binmin = cm;
+      rec_lp += (cm - rec_lp) * klo_rec;
+      rec_lp2 += (cm - rec_lp2) * khi_rec;
+      belo += rec_lp*rec_lp;
+      bemid += (rec_lp2 - rec_lp)*(rec_lp2 - rec_lp);
+      behi += (cm - rec_lp2)*(cm - rec_lp2);
       (wr & (BINSZ-1)) == (BINSZ-1) ? (
-        rob = OVW0 + rec_d*65536;
-        rob[floor(wr/BINSZ)*2] = binmin;
-        rob[floor(wr/BINSZ)*2+1] = binmax;
+        rob = OVW0 + rec_d*OVWST + floor(wr/BINSZ)*5;
+        rob[0] = binmin; rob[1] = binmax;
+        rob[2] = belo; rob[3] = bemid; rob[4] = behi;
         binmin = 1; binmax = -1;
+        belo = 0; bemid = 0; behi = 0;
       );
       wr += 1;
     ) : (
@@ -478,6 +492,16 @@ while (dd < 2) (
         v[fBHL] += (l - v[fBHL])*tc;
         v[fBHR] += (r - v[fBHR])*tc;
         l = v[fBHL]; r = v[fBHR];
+      ) : fx == 8 ? (
+        // samplerate reduction: amt=depth (down to ~srate/128), p2=jitter grit
+        v[fBCC] -= 1;
+        v[fBCC] <= 0 ? (
+          srstep = 1 + amt*amt*127;
+          p2 > 0 ? srstep *= 1 + (rand(2)-1)*p2*0.9;
+          v[fBCC] += max(1, srstep);
+          v[fBHL] = l; v[fBHR] = r;
+        );
+        l = v[fBHL]; r = v[fBHR];
       );
 
       v[fST] == 1 ? (
@@ -512,9 +536,10 @@ outmode < 0.5 ? (
 );
 
 @serialize
-srz_ver = 2;
+srz_ver = 3;
 file_var(0, srz_ver);
 file_var(0, cur);
+(srz_ver >= 3 || file_avail(0) < 0) ? file_var(0, auto_det);
 file_mem(0, 3200, 16);  // per-deck scalars: frames, srate, nsl, sel
 srz_d = 0;
 while (srz_d < 2) (
@@ -538,7 +563,7 @@ file_avail(0) >= 0 ? (
 function fxname(i dst) (
   i==0 ? strcpy(dst,"OFF") : i==1 ? strcpy(dst,"CRUSH") : i==2 ? strcpy(dst,"STRETCH") :
   i==3 ? strcpy(dst,"COMP") : i==4 ? strcpy(dst,"FM") : i==5 ? strcpy(dst,"AM") :
-  i==6 ? strcpy(dst,"RING") : strcpy(dst,"SAT");
+  i==6 ? strcpy(dst,"RING") : i==7 ? strcpy(dst,"SAT") : strcpy(dst,"DOWN");
 );
 function classname(i dst) (
   i==0 ? strcpy(dst,"-") : i==1 ? strcpy(dst,"KICK") : i==2 ? strcpy(dst,"SNARE") :
@@ -613,6 +638,10 @@ lclick ? (
 );
 
 // ------- background chunked tasks (detect / classify / overview) -------
+auto_det_req && task == 0 ? (
+  auto_det_req = 0;
+  task = 1; tsk_d = auto_det_d; det_new = 1;
+);
 task == 1 ? ( // transient detect on deck tsk_d
   det_new ? (
     det_new = 0;
@@ -620,20 +649,37 @@ task == 1 ? ( // transient detect on deck tsk_d
     tk_buf = dbuf(tsk_d);
     tk_sb = slb(tsk_d);
     det_i = 0; det_env = 0; det_slow = 0.001;
+    det_hp = 0;
     det_last = -srate;
     det_gap = floor(0.05 * dk_srate[tsk_d]);
     det_fast = exp(-1/(0.003*dk_srate[tsk_d]));
     det_slowc = 1 - exp(-1/(0.08*dk_srate[tsk_d]));
+    det_khp = 1 - exp(-2*$pi*3000/dk_srate[tsk_d]);
     det_thr = 1.2 + (1 - sens) * 6;
+    det_bwin = floor(0.015 * dk_srate[tsk_d]);
+    det_pre = floor(preroll_ms * 0.001 * dk_srate[tsk_d]);
   );
   det_n = min(det_i + 262144, dk_frames[tsk_d]);
   while (det_i < det_n) (
-    dx = abs(tk_buf[det_i*2]) + abs(tk_buf[det_i*2+1]);
+    dxm = (tk_buf[det_i*2] + tk_buf[det_i*2+1]) * 0.5;
+    det_hp += (dxm - det_hp) * det_khp;
+    // HF-weighted onset signal: broadband + emphasized high band (hats/snaps)
+    dx = abs(tk_buf[det_i*2]) + abs(tk_buf[det_i*2+1]) + 3*abs(dxm - det_hp);
     det_env = max(dx, det_env * det_fast);
     det_slow += (det_env - det_slow) * det_slowc;
     (det_env > det_slow * det_thr && det_env > 0.01 &&
      det_i - det_last > det_gap && dk_nsl[tsk_d] < MAXSL) ? (
-      tk_sb[OF_START+dk_nsl[tsk_d]] = max(0, det_i - 32);
+      // backtrack to the quietest point in the attack window
+      bt0 = max(0, det_i - det_bwin);
+      det_last >= 0 ? bt0 = max(bt0, det_last + 64);
+      btmin = 1e9; btpos = det_i;
+      bti = bt0;
+      while (bti <= det_i) (
+        btv = abs(tk_buf[bti*2]) + abs(tk_buf[bti*2+1]);
+        btv < btmin ? ( btmin = btv; btpos = bti; );
+        bti += 1;
+      );
+      tk_sb[OF_START+dk_nsl[tsk_d]] = max(det_last >= 0 ? det_last + 64 : 0, btpos - det_pre);
       slice_defaults(tsk_d, dk_nsl[tsk_d]);
       dk_nsl[tsk_d] += 1;
       det_last = det_i;
@@ -694,16 +740,24 @@ task == 1 ? ( // transient detect on deck tsk_d
   ov_d > 1 ? task = 0 : (
     dk_frames[ov_d] <= 0 ? ( ov_d += 1; ov_i = 0; ) : (
       tk_buf = dbuf(ov_d);
-      tk_ovb = OVW0 + ov_d*65536;
+      tk_ovb = OVW0 + ov_d*OVWST;
+      ov_klo = 1 - exp(-2*$pi*200/max(dk_srate[ov_d],1));
+      ov_khi = 1 - exp(-2*$pi*4000/max(dk_srate[ov_d],1));
       ov_n = min(ov_i + 262144, dk_frames[ov_d]);
       while (ov_i < ov_n) (
-        (ov_i & (BINSZ-1)) == 0 ? ( ovmin = 1; ovmax = -1; );
+        (ov_i & (BINSZ-1)) == 0 ? ( ovmin = 1; ovmax = -1; ov_el = 0; ov_em = 0; ov_eh = 0; );
         cmm = (tk_buf[ov_i*2] + tk_buf[ov_i*2+1]) * 0.5;
         cmm > ovmax ? ovmax = cmm;
         cmm < ovmin ? ovmin = cmm;
+        ov_lp += (cmm - ov_lp) * ov_klo;
+        ov_lp2 += (cmm - ov_lp2) * ov_khi;
+        ov_el += ov_lp*ov_lp;
+        ov_em += (ov_lp2 - ov_lp)*(ov_lp2 - ov_lp);
+        ov_eh += (cmm - ov_lp2)*(cmm - ov_lp2);
         ((ov_i & (BINSZ-1)) == (BINSZ-1) || ov_i == dk_frames[ov_d]-1) ? (
-          tk_ovb[floor(ov_i/BINSZ)*2] = ovmin;
-          tk_ovb[floor(ov_i/BINSZ)*2+1] = ovmax;
+          tk_ovp = tk_ovb + floor(ov_i/BINSZ)*5;
+          tk_ovp[0] = ovmin; tk_ovp[1] = ovmax;
+          tk_ovp[2] = ov_el; tk_ovp[3] = ov_em; tk_ovp[4] = ov_eh;
         );
         ov_i += 1;
       );
@@ -725,7 +779,7 @@ PRY = PY + PH + 8;
 gsel = dk_sel[cur];
 gsb = slb(cur);
 gfr = dk_frames[cur];
-govw = OVW0 + cur*65536;
+govw = OVW0 + cur*OVWST;
 
 gfx_set(0.12,0.125,0.13,1);
 gfx_rect(0,0,W,H);
@@ -756,6 +810,8 @@ btn(bx, 2, 52, 22, "CLEAR", 0) ? ( dk_nsl[cur] = 0; dk_sel[cur] = -1; );
 bx += 58;
 btn(bx, 2, 72, 22, "MARKERS", 0) && gmem[0] == MAGIC ? import_markers(cur);
 bx += 78;
+btn(bx, 2, 46, 22, "AUTO", auto_det) ? auto_det = !auto_det;
+bx += 52;
 
 gfx_set(0.55,0.58,0.62,1);
 gfx_x = bx + 4; gfx_y = 7;
@@ -841,20 +897,26 @@ fr_show > 0 ? (
     gfx_set(0.25,0.30,0.38,0.45);
     gfx_rect(x0, WY, max(1, x1-x0), WH);
   );
-  gfx_set(0.55,0.75,0.60,1);
   cx = 0;
   totbins = max(1, floor(fr_show/BINSZ));
   while (cx < WW) (
     b0 = floor(cx / WW * totbins);
     b1 = max(b0+1, floor((cx+1) / WW * totbins));
-    pmn = 1; pmx = -1;
+    pmn = 1; pmx = -1; sel_ = 0; sem_ = 0; seh_ = 0;
     bb = b0;
     while (bb < b1) (
-      govw[bb*2] < pmn ? pmn = govw[bb*2];
-      govw[bb*2+1] > pmx ? pmx = govw[bb*2+1];
+      gob = govw + bb*5;
+      gob[0] < pmn ? pmn = gob[0];
+      gob[1] > pmx ? pmx = gob[1];
+      sel_ += gob[2]; sem_ += gob[3]; seh_ += gob[4];
       bb += 1;
     );
     pmx >= pmn ? (
+      // spectral colour: low=warm red, mid=green, high=ice blue
+      set_ = sel_ + sem_ + seh_ + 1e-12;
+      gfx_set(0.28 + 0.72*sel_/set_,
+              0.30 + 0.62*sem_/set_,
+              0.32 + 0.68*seh_/set_, 1);
       y0 = wmid - pmx * (WH/2 - 2);
       y1 = wmid - pmn * (WH/2 - 2);
       gfx_line(WX+cx, y0, WX+cx, max(y1, y0+1));
@@ -987,7 +1049,7 @@ gsel >= 0 && gsel < dk_nsl[cur] ? (
   sprintf(#d, "%d", floor(gsb[OF_PAN+gsel]*100+0.5));
   gsb[OF_PAN+gsel] = ufield(3, fx0+fw*2, fy, fw-4, fh, -1, 1, 0, 0, gsb[OF_PAN+gsel], "PAN", #d);
   fxname(gsb[OF_FX+gsel], #d);
-  gsb[OF_FX+gsel] = ufield(4, fx0+fw*3, fy, fw-4, fh, 0, 7, 0, 1, gsb[OF_FX+gsel], "FX", #d);
+  gsb[OF_FX+gsel] = ufield(4, fx0+fw*3, fy, fw-4, fh, 0, 8, 0, 1, gsb[OF_FX+gsel], "FX", #d);
   sprintf(#d, "%d%%", floor(gsb[OF_AMT+gsel]*100+0.5));
   gsb[OF_AMT+gsel] = ufield(5, fx0+fw*4, fy, fw-4, fh, 0, 1, 0.5, 0, gsb[OF_AMT+gsel], "AMT", #d);
   sprintf(#d, "%d%%", floor(gsb[OF_P2+gsel]*100+0.5));
@@ -1015,7 +1077,7 @@ gsel >= 0 && gsel < dk_nsl[cur] ? (
 // ---------------- footer: global playback fields ----------------
 fy2 = PRY + 30*2 + 12;
 fy2 + 26 < H - 16 ? (
-  fw2 = floor((WW - 10) / 7);
+  fw2 = floor((WW - 10) / 8);
   strcpy(#d, monomode ? "MONO" : "POLY");
   monomode = ufield(20, WX, fy2, fw2-4, 26, 0, 1, 0, 1, monomode, "VOICES", #d);
   strcpy(#d, legato ? "ON" : "OFF");
@@ -1039,11 +1101,13 @@ fy2 + 26 < H - 16 ? (
     gmch < 0.5 ? strcpy(#d, "OMNI") : sprintf(#d, "%d", floor(gmch+0.5));
     mcha = floor(ufield(26, WX+fw2*6, fy2, fw2-4, 26, 0, 16, 0, 1, mcha, "CH A", #d)+0.5);
   );
+  sprintf(#d, "%d ms", floor(preroll_ms+0.5));
+  preroll_ms = floor(ufield(27, WX+fw2*7, fy2, fw2-4, 26, 0, 100, 5, 0, preroll_ms, "PREROLL", #d)+0.5);
 );
 
 gfx_set(0.38,0.40,0.43,1);
 gfx_x = WX; gfx_y = H - 15;
-gfx_drawstr("wave: click=sel dbl=add drag=move alt/rclick=del | pads: click=preview | preset: click=load shift=save alt=clear | markers: lua bridge");
+gfx_drawstr("wave: click=sel dbl=add drag=move alt/rclick=del | AUTO=slice after rec | preset: click=load shift=save alt=clear | colours: red=low green=mid blue=high");
 
 task ? (
   gfx_set(0.9,0.8,0.3,1);
