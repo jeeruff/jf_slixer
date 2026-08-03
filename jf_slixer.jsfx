@@ -22,8 +22,6 @@ slider14:basenote_b=84<0,127,1>Deck B base note
 slider15:mcha=0<0,16,1>Deck A MIDI channel (0=omni)
 slider16:mchb=0<0,16,1>Deck B MIDI channel (0=omni)
 slider17:preroll_ms=5<0,100,1>Slice pre-roll (ms)
-slider20:/jf_slixer:none:Deck A sample file
-slider21:/jf_slixer:none:Deck B sample file
 
 in_pin:left
 in_pin:right
@@ -69,7 +67,7 @@ NSLF = 15;
 fA=0; fS=1; fPOS=2; fRATE=3; fTR=4; fENV=5; fST=6; fGL=7; fGR=8; fNOTE=9;
 fVT=10; fPA=11; fPB=12; fPHA=13; fPHB=14; fBCC=15; fBHL=16; fBHR=17;
 fPH1=18; fCEN=19; fEND=20; fVEL=21; fONOTE=22; fOCH=23; fOBUS=24;
-fDIR=25; fSTART=26;
+fDIR=25; fSTART=26; fGRAN=27;
 
 !initdone ? (
   initdone = 1;
@@ -80,7 +78,6 @@ fDIR=25; fSTART=26;
   fld_active = -1;
   task = 0;
   auto_det = 1;
-  gfa_req = -1; gfb_req = -1;
 );
 
 function slb(d) ( SL0 + d*1024 );
@@ -291,6 +288,7 @@ function trigger_slice(d s vel note ofs) local(sb vb vi v cg tr vol pl pr leg wa
     pl = min(1, 1 - sb[OF_PAN+s]); pr = min(1, 1 + sb[OF_PAN+s]);
     v[fGL] = vol*pl; v[fGR] = vol*pr;
     v[fBCC] = 0; v[fBHL] = 0; v[fBHR] = 0; v[fPH1] = 0; v[fCEN] = 0;
+    v[fGRAN] = -1;  // re-resolve playback path on first sample
     v[fNOTE] = note; v[fVEL] = vel;
     v[fA] = 1;
     sb[OF_MOUT+s] == 1 ? (
@@ -405,16 +403,6 @@ local(h nch fsr frames base chunkfr wrp n i scr l_ r_ cm_ ovp bmn bmx el em eh l
 );
 
 @slider
-!slider_seen ? (
-  // first run after init: don't clobber project-restored audio
-  slider_seen = 1;
-  lastfile_a = slider20; lastfile_b = slider21;
-  dk_frames[0] <= 0 && slider20 > 0 ? load_sample(0, slider20);
-  dk_frames[1] <= 0 && slider21 > 0 ? load_sample(1, slider21);
-) : (
-  slider20 != lastfile_a ? ( lastfile_a = slider20; load_sample(0, slider20); );
-  slider21 != lastfile_b ? ( lastfile_b = slider21; load_sample(1, slider21); );
-);
 
 @block
 gmem[6] = cur;  // publish active deck for companion scripts
@@ -481,19 +469,6 @@ gmem[100] == 1 ? (  // header
   gmem[100] = 0;
 );
 
-// file prev/next requests from the UI
-gfa_req >= 0 ? (
-  slider20 = gfa_req; gfa_req = -1;
-  lastfile_a = slider20;
-  load_sample(0, slider20);
-  sliderchange(slider20);
-);
-gfb_req >= 0 ? (
-  slider21 = gfb_req; gfb_req = -1;
-  lastfile_b = slider21;
-  load_sample(1, slider21);
-  sliderchange(slider21);
-);
 mvol = pow(10, mgain_db/20);
 gcoef = glide_ms <= 0 ? 1 : 1 - exp(-1/(glide_ms * 0.001 * srate));
 atk_inc = 1 / max(1, 0.0015*srate);
@@ -543,6 +518,14 @@ while (midirecv(ofs, m1, m2, m3)) (
     midi_act = 1;
   ) : (st == $x80 || (st == $x90 && m3 == 0)) ? (
     release_note(m2);
+  ) : st == $xD0 ? (
+    // channel aftertouch -> realtime stretch depth per deck
+    (mcha == 0 || mch == mcha-1) ? at0 = m2/127;
+    (mchb == 0 || mch == mchb-1) ? at1 = m2/127;
+  ) : st == $xB0 && m2 == 1 ? (
+    // modwheel -> phase offset inside the slice per deck
+    (mcha == 0 || mch == mcha-1) ? mw0 = m3/127;
+    (mchb == 0 || mch == mchb-1) ? mw1 = m3/127;
   ) : st == $xB0 && (m2 == 123 || m2 == 120) ? (
     kill_all();
   );
@@ -596,6 +579,8 @@ while (dd < 2) (
   cd_vb = V0 + dd*1024;
   cd_sm = dd ? sm1 : sm0;
   cd_syncmode = dk_sync[dd];
+  cd_at = dd ? at1 : at0;
+  cd_mw = dd ? mw1 : mw0;
   aol = 0; aor = 0;
   vi = 0;
   while (vi < NVOICE) (
@@ -607,20 +592,42 @@ while (dd < 2) (
       smode = cd_sb[OF_MODE+s];
       v[fRATE] += (v[fTR] - v[fRATE]) * gcoef;
       rt = v[fRATE] * (cd_syncmode == 1 ? cd_sm : 1);
+      voff = cd_mw * (v[fEND] - v[fSTART]);  // modwheel phase offset
 
-      (fx == 2 || (cd_syncmode == 2 && fx != 4)) ? (
+      gran = fx == 2 || (cd_syncmode == 2 && fx != 4) || (cd_at > 0.003 && fx != 4);
+      gran != v[fGRAN] ? (
+        // seamless path switch (e.g. aftertouch pressed mid-voice)
+        v[fGRAN] = gran;
+        gran ? (
+          v[fVT] = v[fPOS]; v[fPA] = v[fPOS]; v[fPB] = v[fPOS];
+          v[fPHA] = 0; v[fPHB] = 0.5;
+        ) : v[fPOS] = v[fVT];
+      );
+
+      gran ? (
         // granular: 2 hann-windowed heads, timeline independent of pitch;
-        // also forced for all voices when deck sync mode is STRETCH
+        // forced when deck sync is STRETCH or aftertouch is pressed
         spd = (fx == 2 ? pow(4, 1 - 2*amt) : 1)
               * (dk_srate[dd] > 0 ? dk_srate[dd]/srate : 1)
-              * (cd_syncmode ? cd_sm : 1);
+              * (cd_syncmode ? cd_sm : 1)
+              * pow(0.25, cd_at);
         glen = (fx == 2 ? 0.02 + p2*0.1 : 0.06) * srate;
         v[fVT] += spd * v[fDIR];
         wrap_pos(v, fVT, smode);
         v[fPA] += rt; v[fPB] += rt;
         v[fPHA] += 1/glen; v[fPHB] += 1/glen;
-        v[fPHA] >= 1 ? ( v[fPHA] -= 1; v[fPA] = v[fVT]; );
-        v[fPHB] >= 1 ? ( v[fPHB] -= 1; v[fPB] = v[fVT]; );
+        v[fPHA] >= 1 ? (
+          v[fPHA] -= 1;
+          gpn = v[fVT] + voff;
+          gpn >= v[fEND] ? gpn -= (v[fEND] - v[fSTART]);
+          v[fPA] = gpn;
+        );
+        v[fPHB] >= 1 ? (
+          v[fPHB] -= 1;
+          gpn = v[fVT] + voff;
+          gpn >= v[fEND] ? gpn -= (v[fEND] - v[fSTART]);
+          v[fPB] = gpn;
+        );
         wa = 0.5 - 0.5*cos(2*$pi*v[fPHA]);
         wb = 0.5 - 0.5*cos(2*$pi*v[fPHB]);
         l = readsmp(v[fPA],0)*wa + readsmp(v[fPB],0)*wb;
@@ -629,12 +636,16 @@ while (dd < 2) (
         // FM of playback position
         frq = 30 * pow(2, p2*7);
         v[fPH1] += frq/srate * 2*$pi;
-        mp = v[fPOS] + sin(v[fPH1]) * amt*amt*400;
+        rp = v[fPOS] + voff;
+        rp >= v[fEND] ? rp -= (v[fEND] - v[fSTART]);
+        mp = rp + sin(v[fPH1]) * amt*amt*400;
         l = readsmp(mp,0); r = readsmp(mp,1);
         v[fPOS] += rt * v[fDIR];
         wrap_pos(v, fPOS, smode);
       ) : (
-        l = readsmp(v[fPOS],0); r = readsmp(v[fPOS],1);
+        rp = v[fPOS] + voff;
+        rp >= v[fEND] ? rp -= (v[fEND] - v[fSTART]);
+        l = readsmp(rp,0); r = readsmp(rp,1);
         v[fPOS] += rt * v[fDIR];
         wrap_pos(v, fPOS, smode);
       );
@@ -771,6 +782,16 @@ function moutname(i dst) (
 );
 function modename(i dst) (
   i==0 ? strcpy(dst,"FWD") : i==1 ? strcpy(dst,"REV") : i==2 ? strcpy(dst,"LOOP") : strcpy(dst,"PP");
+);
+function notename(n dst) local(pc oct) (
+  n = floor(n + 0.5);
+  pc = n % 12; oct = floor(n/12) - 1;
+  pc==0  ? sprintf(dst,"C%d",oct)  : pc==1  ? sprintf(dst,"C#%d",oct) :
+  pc==2  ? sprintf(dst,"D%d",oct)  : pc==3  ? sprintf(dst,"D#%d",oct) :
+  pc==4  ? sprintf(dst,"E%d",oct)  : pc==5  ? sprintf(dst,"F%d",oct)  :
+  pc==6  ? sprintf(dst,"F#%d",oct) : pc==7  ? sprintf(dst,"G%d",oct)  :
+  pc==8  ? sprintf(dst,"G#%d",oct) : pc==9  ? sprintf(dst,"A%d",oct)  :
+  pc==10 ? sprintf(dst,"A#%d",oct) : sprintf(dst,"B%d",oct);
 );
 
 function btn(x y w h lab on) local(hit r) (
@@ -1010,14 +1031,6 @@ btn(bx, 2, 72, 22, "MARKERS", 0) && gmem[0] == MAGIC ? import_markers(cur);
 bx += 78;
 btn(bx, 2, 46, 22, "AUTO", auto_det) ? auto_det = !auto_det;
 bx += 52;
-btn(bx, 2, 22, 22, "<", 0) ? (
-  cur ? gfb_req = max(0, slider21 - 1) : gfa_req = max(0, slider20 - 1);
-);
-bx += 24;
-btn(bx, 2, 22, 22, ">", 0) ? (
-  cur ? gfb_req = min(1023, slider21 + 1) : gfa_req = min(1023, slider20 + 1);
-);
-bx += 28;
 // LOAD/ITEM go through the background helper (jf_slixer_helper.lua)
 gmem[8] != hb_last ? ( hb_last = gmem[8]; hb_t = time_precise(); );
 helper_ok = time_precise() - hb_t < 2;
@@ -1037,10 +1050,10 @@ capturing ? (
 ) : armed ? (
   sprintf(#info, "armed %s - waiting for audio/transport", rec_d ? "B" : "A");
 ) : gfr > 0 ? (
-  sprintf(#info, "%s: file %d  %d Hz  %.2fs  %d slices", cur ? "B" : "A",
-          cur ? slider21 : slider20, dk_srate[cur], gfr/max(dk_srate[cur],1), dk_nsl[cur]);
+  sprintf(#info, "%s: %d Hz  %.2fs  %d slices", cur ? "B" : "A",
+          dk_srate[cur], gfr/max(dk_srate[cur],1), dk_nsl[cur]);
 ) : (
-  sprintf(#info, "%s: empty - pick a file with < > (Data/jf_slixer) or REC/ARM", cur ? "B" : "A");
+  sprintf(#info, "%s: empty - LOAD, ITEM, drop a file, or REC/ARM", cur ? "B" : "A");
 );
 gfx_drawstr(#info);
 
@@ -1176,7 +1189,8 @@ fr_show > 0 ? (
     );
     gfx_x = gmx+3; gfx_y = WY + WH - 14;
     gfx_set(0.7,0.72,0.75,1);
-    sprintf(#sn, "%d", gsi+1);
+    notename((cur ? basenote_b : basenote_a) + gsi, #nn);
+    sprintf(#sn, "%d %s", gsi+1, #nn);
     gfx_drawstr(#sn);
     gsi += 1;
   );
@@ -1260,7 +1274,7 @@ while (gpi < MAXSL) (
     sprintf(#pn, "%d", gpi+1);
     gfx_drawstr(#pn);
     gfx_x = gpx+3; gfx_y = gpy+padh-14;
-    sprintf(#pn, "%d", gbase+gpi);
+    notename(gbase+gpi, #pn);
     gfx_drawstr(#pn);
     lclick && mouse_x >= gpx && mouse_x < gpx+padw-2 && mouse_y >= gpy && mouse_y < gpy+padh ? (
       dk_sel[cur] = gpi;
@@ -1314,7 +1328,7 @@ gsel >= 0 && gsel < dk_nsl[cur] ? (
 ) : (
   gfx_set(0.4,0.42,0.45,1);
   gfx_x = WX; gfx_y = PRY + 8;
-  gfx_drawstr("no slice selected - pick a file with < > (put WAVs in REAPER/Data/jf_slixer), or REC, then play pads via MIDI");
+  gfx_drawstr("no slice selected - LOAD a file, ITEM (selected item), drop a file here, or REC, then play pads via MIDI");
 );
 
 // ---------------- footer: global playback fields ----------------
@@ -1354,7 +1368,7 @@ warn_t > 0 && time_precise() - warn_t < 4 ? (
   gfx_set(0.95,0.6,0.3,1);
   gfx_drawstr("helper off: run jf_slixer_helper.lua once (Actions) or restart REAPER for autostart");
 ) : (
-  gfx_drawstr("v0.7 | LOAD=file dialog ITEM=selected item, or drop file here | wave: dbl=add drag=move alt=del | preset: shift=save alt=clear");
+  gfx_drawstr("v0.8 | LOAD=file dialog ITEM=selected item, or drop file here (goes to active deck) | wave: dbl=add drag=move alt=del | preset: shift=save alt=clear");
 );
 
 task ? (
