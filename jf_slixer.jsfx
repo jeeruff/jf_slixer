@@ -747,7 +747,7 @@ file_avail(0) >= 0 ? (
   (dk_frames[0] > 0 || dk_frames[1] > 0) ? ( task = 3; ov_d = 0; ov_i = 0; );
 );
 
-@gfx 760 560
+@gfx 860 560
 
 function fxname(i dst) (
   i==0 ? strcpy(dst,"OFF") : i==1 ? strcpy(dst,"CRUSH") : i==2 ? strcpy(dst,"STRETCH") :
@@ -1018,6 +1018,17 @@ btn(bx, 2, 22, 22, ">", 0) ? (
   cur ? gfb_req = min(1023, slider21 + 1) : gfa_req = min(1023, slider20 + 1);
 );
 bx += 28;
+// LOAD/ITEM go through the background helper (jf_slixer_helper.lua)
+gmem[8] != hb_last ? ( hb_last = gmem[8]; hb_t = time_precise(); );
+helper_ok = time_precise() - hb_t < 2;
+btn(bx, 2, 52, 22, "LOAD", 0) ? (
+  helper_ok ? gmem[7] = 1 : warn_t = time_precise();
+);
+bx += 56;
+btn(bx, 2, 48, 22, "ITEM", 0) ? (
+  helper_ok ? gmem[7] = 2 : warn_t = time_precise();
+);
+bx += 52;
 
 gfx_set(0.55,0.58,0.62,1);
 gfx_x = bx + 4; gfx_y = 7;
@@ -1339,7 +1350,12 @@ fy2 + 26 < H - 16 ? (
 
 gfx_set(0.38,0.40,0.43,1);
 gfx_x = WX; gfx_y = H - 15;
-gfx_drawstr("v0.6 | drop file here to load | wave: click=sel dbl=add drag=move alt/rclick=del | preset: click shift=save alt=clear | red=low green=mid blue=high");
+warn_t > 0 && time_precise() - warn_t < 4 ? (
+  gfx_set(0.95,0.6,0.3,1);
+  gfx_drawstr("helper off: run jf_slixer_helper.lua once (Actions) or restart REAPER for autostart");
+) : (
+  gfx_drawstr("v0.7 | LOAD=file dialog ITEM=selected item, or drop file here | wave: dbl=add drag=move alt=del | preset: shift=save alt=clear");
+);
 
 task ? (
   gfx_set(0.9,0.8,0.3,1);
