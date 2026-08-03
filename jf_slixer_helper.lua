@@ -8,7 +8,7 @@
 
 local CHUNK = 32768
 local DATA  = 16384
-local MAXFR = 8286208
+local MAXFR = 8269824
 
 reaper.gmem_attach("jf_slixer")
 

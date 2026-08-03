@@ -7,7 +7,7 @@
 
 local CHUNK = 32768   -- кадров за передачу (64k значений gmem)
 local DATA  = 16384   -- регион данных в gmem
-local MAXFR = 8286208 -- лимит буфера деки в jf_slixer
+local MAXFR = 8269824 -- лимит буфера деки в jf_slixer
 
 reaper.gmem_attach("jf_slixer")
 
