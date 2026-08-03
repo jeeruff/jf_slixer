@@ -22,6 +22,8 @@ slider14:basenote_b=84<0,127,1>Deck B base note
 slider15:mcha=0<0,16,1>Deck A MIDI channel (0=omni)
 slider16:mchb=0<0,16,1>Deck B MIDI channel (0=omni)
 slider17:preroll_ms=5<0,100,1>Slice pre-roll (ms)
+slider20:/jf_slixer:none:Deck A sample file
+slider21:/jf_slixer:none:Deck B sample file
 
 in_pin:left
 in_pin:right
@@ -49,6 +51,7 @@ dk_sel    = 3212;
 SL0     = 4096;               // slice tables: deck stride 1024, field stride 64
 V0      = 8192;               // voices: deck stride 1024 (16 * 32)
 PRE     = 16384;              // presets: 16 slots (2 decks * 8) * 1024
+SCR     = 32768;              // file-load scratch (32768 words, up to OVW0)
 OVW0    = 65536;              // overview bins: 5 words/bin (min,max,elo,emid,ehi)
 OVWST   = 172032;             // per-deck overview stride
 BUF0    = 409600;             // audio: stereo interleaved, deck stride below
@@ -74,6 +77,7 @@ fPH1=18; fCEN=19; fEND=20; fVEL=21; fONOTE=22; fOCH=23; fOBUS=24;
   fld_active = -1;
   task = 0;
   auto_det = 1;
+  gfa_req = -1; gfb_req = -1;
 );
 
 function slb(d) ( SL0 + d*1024 );
@@ -322,9 +326,86 @@ function finish_capture() local(b ob) (
   wr > 0 && auto_det ? ( auto_det_req = 1; auto_det_d = rec_d; );
 );
 
+function load_sample(d fs)
+local(h nch fsr frames base chunkfr wrp n i scr l_ r_ cm_ ovp bmn bmx el em eh lp lp2 klo khi bi)
+(
+  h = file_open(fs);
+  h > 0 ? (
+    nch = 0; fsr = 0;
+    file_riff(h, nch, fsr);
+    nch > 0 && fsr > 0 ? (
+      frames = min(floor(file_avail(h)/nch), DECKFR);
+      frames > 0 ? (
+        base = dbuf(d);
+        ovp = OVW0 + d*OVWST;
+        scr = SCR;
+        chunkfr = max(1, floor(28672/nch));
+        klo = 1 - exp(-2*$pi*200/fsr);
+        khi = 1 - exp(-2*$pi*4000/fsr);
+        bmn = 1; bmx = -1; el = 0; em = 0; eh = 0; lp = 0; lp2 = 0;
+        wrp = 0;
+        while (wrp < frames) (
+          n = min(chunkfr, frames - wrp);
+          file_mem(h, scr, n*nch);
+          i = 0;
+          while (i < n) (
+            l_ = scr[i*nch];
+            r_ = nch > 1 ? scr[i*nch+1] : l_;
+            base[(wrp+i)*2] = l_;
+            base[(wrp+i)*2+1] = r_;
+            cm_ = (l_ + r_)*0.5;
+            cm_ > bmx ? bmx = cm_;
+            cm_ < bmn ? bmn = cm_;
+            lp += (cm_ - lp)*klo;
+            lp2 += (cm_ - lp2)*khi;
+            el += lp*lp;
+            em += (lp2 - lp)*(lp2 - lp);
+            eh += (cm_ - lp2)*(cm_ - lp2);
+            ( ((wrp+i) & (BINSZ-1)) == (BINSZ-1) || wrp+i == frames-1 ) ? (
+              bi = ovp + floor((wrp+i)/BINSZ)*5;
+              bi[0]=bmn; bi[1]=bmx; bi[2]=el; bi[3]=em; bi[4]=eh;
+              bmn = 1; bmx = -1; el = 0; em = 0; eh = 0;
+            );
+            i += 1;
+          );
+          wrp += n;
+        );
+        dk_frames[d] = frames;
+        dk_srate[d] = fsr;
+        dk_nsl[d] = 0; dk_sel[d] = -1;
+        auto_det ? ( auto_det_req = 1; auto_det_d = d; );
+      );
+    );
+    file_close(h);
+  );
+);
+
 @slider
+!slider_seen ? (
+  // first run after init: don't clobber project-restored audio
+  slider_seen = 1;
+  lastfile_a = slider20; lastfile_b = slider21;
+  dk_frames[0] <= 0 && slider20 > 0 ? load_sample(0, slider20);
+  dk_frames[1] <= 0 && slider21 > 0 ? load_sample(1, slider21);
+) : (
+  slider20 != lastfile_a ? ( lastfile_a = slider20; load_sample(0, slider20); );
+  slider21 != lastfile_b ? ( lastfile_b = slider21; load_sample(1, slider21); );
+);
 
 @block
+// file prev/next requests from the UI
+gfa_req >= 0 ? (
+  slider20 = gfa_req; gfa_req = -1;
+  lastfile_a = slider20;
+  load_sample(0, slider20);
+  sliderchange(slider20);
+);
+gfb_req >= 0 ? (
+  slider21 = gfb_req; gfb_req = -1;
+  lastfile_b = slider21;
+  load_sample(1, slider21);
+  sliderchange(slider21);
+);
 mvol = pow(10, mgain_db/20);
 gcoef = glide_ms <= 0 ? 1 : 1 - exp(-1/(glide_ms * 0.001 * srate));
 atk_inc = 1 / max(1, 0.0015*srate);
@@ -812,6 +893,14 @@ btn(bx, 2, 72, 22, "MARKERS", 0) && gmem[0] == MAGIC ? import_markers(cur);
 bx += 78;
 btn(bx, 2, 46, 22, "AUTO", auto_det) ? auto_det = !auto_det;
 bx += 52;
+btn(bx, 2, 22, 22, "<", 0) ? (
+  cur ? gfb_req = max(0, slider21 - 1) : gfa_req = max(0, slider20 - 1);
+);
+bx += 24;
+btn(bx, 2, 22, 22, ">", 0) ? (
+  cur ? gfb_req = min(1023, slider21 + 1) : gfa_req = min(1023, slider20 + 1);
+);
+bx += 28;
 
 gfx_set(0.55,0.58,0.62,1);
 gfx_x = bx + 4; gfx_y = 7;
@@ -820,9 +909,10 @@ capturing ? (
 ) : armed ? (
   sprintf(#info, "armed %s - waiting for audio/transport", rec_d ? "B" : "A");
 ) : gfr > 0 ? (
-  sprintf(#info, "%s: %d Hz  %.2fs  %d slices", cur ? "B" : "A", dk_srate[cur], gfr/max(dk_srate[cur],1), dk_nsl[cur]);
+  sprintf(#info, "%s: file %d  %d Hz  %.2fs  %d slices", cur ? "B" : "A",
+          cur ? slider21 : slider20, dk_srate[cur], gfr/max(dk_srate[cur],1), dk_nsl[cur]);
 ) : (
-  sprintf(#info, "%s: empty - REC (instant) or ARM (wait for playback)", cur ? "B" : "A");
+  sprintf(#info, "%s: empty - pick a file with < > (Data/jf_slixer) or REC/ARM", cur ? "B" : "A");
 );
 gfx_drawstr(#info);
 
@@ -922,6 +1012,17 @@ fr_show > 0 ? (
       gfx_line(WX+cx, y0, WX+cx, max(y1, y0+1));
     );
     cx += 1;
+  );
+  // alternating slice zone tint - makes the cut structure obvious
+  gsi = 0;
+  while (gsi < dk_nsl[cur]) (
+    (gsi & 1) ? (
+      x0 = WX + gsb[OF_START+gsi]/fr_show * WW;
+      x1 = WX + gsb[OF_END+gsi]/fr_show * WW;
+      gfx_set(1,1,1,0.06);
+      gfx_rect(x0, WY, max(1, x1-x0), WH);
+    );
+    gsi += 1;
   );
   // slice markers
   gsi = 0;
@@ -1071,7 +1172,7 @@ gsel >= 0 && gsel < dk_nsl[cur] ? (
 ) : (
   gfx_set(0.4,0.42,0.45,1);
   gfx_x = WX; gfx_y = PRY + 8;
-  gfx_drawstr("no slice selected - record into this deck, then DETECT or double-click the waveform");
+  gfx_drawstr("no slice selected - pick a file with < > (put WAVs in REAPER/Data/jf_slixer), or REC, then play pads via MIDI");
 );
 
 // ---------------- footer: global playback fields ----------------
