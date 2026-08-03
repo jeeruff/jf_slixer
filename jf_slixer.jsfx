@@ -858,7 +858,7 @@ task == 1 ? ( // transient detect on deck tsk_d
       // backtrack to the quietest point in the attack window
       bt0 = max(0, det_i - det_bwin);
       det_last >= 0 ? bt0 = max(bt0, det_last + 64);
-      btmin = 1e9; btpos = det_i;
+      btmin = 1000000000; btpos = det_i;
       bti = bt0;
       while (bti <= det_i) (
         btv = abs(tk_buf[bti*2]) + abs(tk_buf[bti*2+1]);
@@ -889,8 +889,8 @@ task == 1 ? ( // transient detect on deck tsk_d
       cls_inslice = 1;
       cls_i = tk_sb[OF_START+cls_s];
       cls_lp = 0; cls_lp2 = 0;
-      cls_el = 0; cls_eh = 0; cls_et = 1e-9;
-      cls_peak = 1e-9; cls_lastloud = cls_i;
+      cls_el = 0; cls_eh = 0; cls_et = 0.000000001;
+      cls_peak = 0.000000001; cls_lastloud = cls_i;
       cls_klo = 1 - exp(-2*$pi*180/dk_srate[tsk_d]);
       cls_khi = 1 - exp(-2*$pi*4500/dk_srate[tsk_d]);
     );
