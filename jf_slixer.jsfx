@@ -987,12 +987,12 @@ function classname(i dst) (
   i==3 ? strcpy(dst,"HAT") : i==4 ? strcpy(dst,"PERC") : strcpy(dst,"CRASH");
 );
 function classcol(i) (
-  i==1 ? gfx_set(0.95,0.45,0.30,1) :
-  i==2 ? gfx_set(0.95,0.85,0.35,1) :
-  i==3 ? gfx_set(0.40,0.85,0.95,1) :
-  i==4 ? gfx_set(0.50,0.90,0.50,1) :
-  i==5 ? gfx_set(0.90,0.45,0.90,1) :
-         gfx_set(0.62,0.62,0.62,1);
+  i==1 ? gfx_set(0.91,0.36,0.18,1) :
+  i==2 ? gfx_set(0.89,0.70,0.25,1) :
+  i==3 ? gfx_set(0.43,0.77,0.85,1) :
+  i==4 ? gfx_set(0.49,0.75,0.42,1) :
+  i==5 ? gfx_set(0.73,0.56,0.85,1) :
+         gfx_set(0.43,0.42,0.41,1);
 );
 function moutname(i dst) (
   i==0 ? strcpy(dst,"OFF") : i==1 ? strcpy(dst,"NOTE") : strcpy(dst,"CC");
@@ -1011,21 +1011,30 @@ function notename(n dst) local(pc oct) (
   pc==10 ? sprintf(dst,"A#%d",oct) : sprintf(dst,"B%d",oct);
 );
 
-function btn(x y w h lab on) local(hit r) (
+// palette: three grays, class colors carry the code, one orange accent
+function c_text()  ( gfx_set(0.92,0.90,0.88,1) );
+function c_val()   ( gfx_set(0.78,0.76,0.74,1) );
+function c_dim()   ( gfx_set(0.56,0.55,0.53,1) );
+function c_faint() ( gfx_set(0.35,0.34,0.33,1) );
+function c_hair()  ( gfx_set(0.17,0.17,0.17,1) );
+function c_panel() ( gfx_set(0.105,0.105,0.11,1) );
+function c_acc()   ( gfx_set(0.94,0.32,0.12,1) );
+
+// flat text button: dim label, active = bright text + accent underline
+function btn(x y w h lab on) local(hit) (
   hit = mouse_x >= x && mouse_x < x+w && mouse_y >= y && mouse_y < y+h;
-  on ? gfx_set(0.85,0.35,0.30,1) : hit ? gfx_set(0.32,0.34,0.38,1) : gfx_set(0.24,0.26,0.29,1);
-  gfx_rect(x,y,w,h);
-  gfx_set(0.5,0.52,0.55,1);
-  gfx_rect(x,y,w,1); gfx_rect(x,y+h-1,w,1); gfx_rect(x,y,1,h); gfx_rect(x+w-1,y,1,h);
-  gfx_set(0.92,0.93,0.94,1);
+  gfx_setfont(2);
+  on ? c_text() : hit ? c_val() : c_dim();
   gfx_measurestr(lab, btw, bth);
-  gfx_x = x + (w-btw)/2; gfx_y = y + (h-bth)/2;
+  gfx_x = x + (w-btw)/2; gfx_y = y + (h-bth)/2 - 1;
   gfx_drawstr(lab);
-  r = hit && lclick;
-  r;
+  on ? ( c_acc(); gfx_rect(x, y+h-uln, w, uln); );
+  hit && lclick;
 );
 
-function ufield(id x y w h lo hi def isenum val lab disp) local(hit nv tw th) (
+// flat cell: small label, value below, left hairline; value tracks the
+// pointer 1:1 within the frame, no easing; active = accent underline
+function ufield(id x y w h lo hi def isenum val lab disp) local(hit nv) (
   hit = mouse_x >= x && mouse_x < x+w && mouse_y >= y && mouse_y < y+h;
   hit && lclick ? (
     dbl ? (
@@ -1041,22 +1050,32 @@ function ufield(id x y w h lo hi def isenum val lab disp) local(hit nv tw th) (
     val = min(hi, max(lo, nv));
   );
   fld_active == id && !(mouse_cap & 1) ? fld_active = -1;
-  fld_active == id ? gfx_set(0.30,0.36,0.44,1) : gfx_set(0.22,0.24,0.27,1);
-  gfx_rect(x,y,w,h);
-  gfx_set(0.42,0.44,0.48,1);
-  gfx_rect(x,y,w,1); gfx_rect(x,y+h-1,w,1); gfx_rect(x,y,1,h); gfx_rect(x+w-1,y,1,h);
-  gfx_set(0.55,0.58,0.62,1);
-  gfx_x = x+4; gfx_y = y+2;
+  c_hair();
+  gfx_rect(x, y, 1, h);
+  gfx_setfont(3);
+  c_faint();
+  gfx_x = x + cpad; gfx_y = y + max(2, floor(3*scl));
   gfx_drawstr(lab);
-  gfx_set(0.93,0.94,0.95,1);
-  gfx_measurestr(disp, tw, th);
-  gfx_x = x + w - tw - 4; gfx_y = y + h - th - 2;
+  gfx_setfont(1);
+  (fld_active == id || hit) ? c_text() : c_val();
+  gfx_x = x + cpad; gfx_y = y + h - fs_val - max(3, floor(4*scl));
   gfx_drawstr(disp);
+  fld_active == id ? ( c_acc(); gfx_rect(x, y+h-uln, w, uln); );
   val;
 );
 
-gfx_setfont(1, "Arial", 12);
 W = gfx_w; H = gfx_h;
+scl = min(W/860, H/560);
+scl = max(0.6, min(2.2, scl));
+fs_val = max(10, floor(13*scl + 0.5));
+fs_ctl = max(9,  floor(11*scl + 0.5));
+fs_lab = max(8,  floor(9*scl + 0.5));
+gfx_setfont(1, "Arial", fs_val);
+gfx_setfont(2, "Arial", fs_ctl);
+gfx_setfont(3, "Arial", fs_lab);
+M = floor(12*scl);
+uln = max(1, floor(2*scl));
+cpad = max(5, floor(9*scl));
 
 // drag-and-drop: file dropped onto the plugin window loads into current deck
 !drop_req && gfx_getdropfile(0, #droppath) > 0 ? (
@@ -1203,104 +1222,140 @@ task == 1 ? ( // transient detect on deck tsk_d
   );
 );
 
-// ---------------- layout ----------------
-WX = 8;
-WW = W - 16;
-WY = 58;
-WH = max(80, floor(H * 0.30));
-PY = WY + WH + 8;
-padw = floor(WW / 16);
-padh = 26;
-PH = padh*4 + 6;
-PRY = PY + PH + 8;
+// ---------------- layout: heights scale from scl, widths fill from W ----------------
+row1h = floor(24*scl);
+row2h = floor(20*scl);
+y1 = floor(8*scl);
+y2 = y1 + row1h + floor(4*scl);
+WX = M; WW = W - 2*M;
+WY = y2 + row2h + floor(8*scl);
+hinth = fs_lab + floor(7*scl);
+footh = floor(30*scl);
+cellh = floor(30*scl);
+fxh   = floor(44*scl);
+strh  = floor(24*scl);
+padh  = floor(24*scl);
+padgap = max(1, floor(2*scl));
+padw = floor((WW - padgap*15) / 16);
+PH = padh*4 + padgap*3;
+foot_y = H - hinth - footh - floor(6*scl);
+str_y = foot_y - floor(8*scl) - strh;
+fx_y  = str_y - floor(4*scl) - fxh;
+pr_y  = fx_y - floor(4*scl) - cellh;
+PY = pr_y - floor(8*scl) - PH;
+WH = max(40, PY - floor(8*scl) - WY);
 gsel = dk_sel[cur];
 gsb = slb(cur);
 gfr = dk_frames[cur];
 govw = OVW0 + cur*OVWST;
 
-gfx_set(0.12,0.125,0.13,1);
+gfx_set(0.082,0.082,0.082,1);
 gfx_rect(0,0,W,H);
 
-// ---------------- toolbar row 1: decks + transport ----------------
-bx = 8;
-btn(bx, 2, 30, 22, "A", cur == 0) ? ( cur = 0; );
-bx += 32;
-btn(bx, 2, 30, 22, "B", cur == 1) ? ( cur = 1; );
-bx += 40;
-btn(bx, 2, 46, 22, "REC", capturing) ? (
+// ---------------- row 1: decks, transport, actions ----------------
+bx = M;
+tabw = floor(24*scl);
+btn(bx, y1, tabw, row1h, "A", cur == 0) ? cur = 0;
+bx += tabw + floor(4*scl);
+btn(bx, y1, tabw, row1h, "B", cur == 1) ? cur = 1;
+bx += tabw + floor(12*scl);
+
+// REC: dot + label
+recw = floor(46*scl);
+rhit = mouse_x >= bx && mouse_x < bx+recw && mouse_y >= y1 && mouse_y < y1+row1h;
+rcy = y1 + row1h/2;
+rcr = max(3, floor(4*scl));
+c_acc();
+gfx_circle(bx+rcr+1, rcy, rcr, capturing);
+gfx_setfont(2);
+capturing ? c_text() : rhit ? c_val() : c_dim();
+gfx_x = bx + rcr*2 + floor(5*scl); gfx_y = rcy - fs_ctl/2 - 1;
+gfx_drawstr("REC");
+rhit && lclick ? (
   capturing ? finish_capture() : (
     task == 0 ? ( rec_d = cur; armed = 1; capturing = 1; wr = 0; binmin = 1; binmax = -1; );
   );
 );
-bx += 52;
-btn(bx, 2, 52, 22, "ARM", armed && !capturing) ? (
+bx += recw + floor(8*scl);
+
+aw = floor(36*scl);
+btn(bx, y1, aw, row1h, "ARM", armed && !capturing) ? (
   armed && !capturing ? armed = 0 : (
     task == 0 && !capturing ? ( rec_d = cur; armed = 1; );
   );
 );
-bx += 58;
-btn(bx, 2, 62, 22, "DETECT", task == 1) && gfr > 0 && task == 0 ? ( task = 1; tsk_d = cur; det_new = 1; );
-bx += 68;
-btn(bx, 2, 68, 22, "CLASSIFY", task == 2) && dk_nsl[cur] > 0 && task == 0 ? ( task = 2; tsk_d = cur; cls_new = 1; );
-bx += 74;
-btn(bx, 2, 52, 22, "CLEAR", 0) ? ( dk_nsl[cur] = 0; dk_sel[cur] = -1; );
-bx += 58;
-btn(bx, 2, 72, 22, "MARKERS", 0) && gmem[0] == MAGIC ? import_markers(cur);
-bx += 78;
-btn(bx, 2, 46, 22, "AUTO", auto_det) ? auto_det = !auto_det;
-bx += 52;
+bx += aw + floor(8*scl);
+aw = floor(50*scl);
+btn(bx, y1, aw, row1h, "DETECT", task == 1) && gfr > 0 && task == 0 ? ( task = 1; tsk_d = cur; det_new = 1; );
+bx += aw + floor(8*scl);
+aw = floor(60*scl);
+btn(bx, y1, aw, row1h, "CLASSIFY", task == 2) && dk_nsl[cur] > 0 && task == 0 ? ( task = 2; tsk_d = cur; cls_new = 1; );
+bx += aw + floor(8*scl);
+aw = floor(42*scl);
+btn(bx, y1, aw, row1h, "CLEAR", 0) ? ( dk_nsl[cur] = 0; dk_sel[cur] = -1; );
+bx += aw + floor(8*scl);
+aw = floor(60*scl);
+btn(bx, y1, aw, row1h, "MARKERS", 0) && gmem[0] == MAGIC ? import_markers(cur);
+bx += aw + floor(8*scl);
+aw = floor(38*scl);
+btn(bx, y1, aw, row1h, "AUTO", auto_det) ? auto_det = !auto_det;
+bx += aw + floor(8*scl);
 // LOAD/ITEM go through the background helper (jf_slixer_helper.lua)
 gmem[8] != hb_last ? ( hb_last = gmem[8]; hb_t = time_precise(); );
 helper_ok = time_precise() - hb_t < 2;
-btn(bx, 2, 52, 22, "LOAD", 0) ? (
+aw = floor(38*scl);
+btn(bx, y1, aw, row1h, "LOAD", 0) ? (
   helper_ok ? gmem[7] = 1 : warn_t = time_precise();
 );
-bx += 56;
-btn(bx, 2, 48, 22, "ITEM", 0) ? (
+bx += aw + floor(8*scl);
+aw = floor(36*scl);
+btn(bx, y1, aw, row1h, "ITEM", 0) ? (
   helper_ok ? gmem[7] = 2 : warn_t = time_precise();
 );
-bx += 52;
+bx += aw + floor(8*scl);
 
-gfx_set(0.55,0.58,0.62,1);
-gfx_x = bx + 4; gfx_y = 7;
+// status, right-aligned small; orange while MIDI is coming in
 capturing ? (
-  sprintf(#info, "REC %s %.2fs", rec_d ? "B" : "A", wr/srate);
+  sprintf(#info, "REC %s  %.2f s", rec_d ? "B" : "A", wr/srate);
 ) : armed ? (
-  sprintf(#info, "armed %s - waiting for audio/transport", rec_d ? "B" : "A");
+  sprintf(#info, "%s armed", rec_d ? "B" : "A");
 ) : gfr > 0 ? (
-  sprintf(#info, "%s: %d Hz  %.2fs  %d slices", cur ? "B" : "A",
+  sprintf(#info, "%s · %d Hz · %.2f s · %d slices", cur ? "B" : "A",
           dk_srate[cur], gfr/max(dk_srate[cur],1), dk_nsl[cur]);
 ) : (
-  sprintf(#info, "%s: empty - LOAD, ITEM, drop a file, or REC/ARM", cur ? "B" : "A");
+  sprintf(#info, "%s · empty · LOAD / ITEM / drop / REC", cur ? "B" : "A");
 );
-gfx_drawstr(#info);
-
-midi_act ? (
-  gfx_set(0.4,0.9,0.5,1);
-  gfx_circle(W-14, 13, 5, 1);
-  midi_act = 0;
+gfx_setfont(3);
+gfx_measurestr(#info, iw, ih);
+W - M - iw > bx ? (
+  midi_act ? c_acc() : c_dim();
+  gfx_x = W - M - iw; gfx_y = y1 + (row1h-ih)/2;
+  gfx_drawstr(#info);
 );
+midi_act = 0;
 
-// ---------------- toolbar row 2: presets + out mode + crossfader ----------------
-gfx_set(0.55,0.58,0.62,1);
-gfx_x = 8; gfx_y = 33;
+// ---------------- row 2: presets, out, sync, clone, keys, crossfader ----------------
+gfx_setfont(3);
+c_faint();
+gfx_x = M; gfx_y = y2 + floor(5*scl);
 gfx_drawstr("PRESET");
-psx = 58;
+gfx_measurestr("PRESET", iw, ih);
+psx = M + iw + floor(8*scl);
+psz = floor(16*scl);
+pgap = max(2, floor(4*scl));
+psy = y2 + (row2h - psz)/2;
 gpi = 0;
 while (gpi < 8) (
-  ppx = psx + gpi*24;
+  ppx = psx + gpi*(psz+pgap);
   ppp = PRE + (cur*8+gpi)*1024;
-  pflag = ppp[0];
-  phit = mouse_x >= ppx && mouse_x < ppx+22 && mouse_y >= 28 && mouse_y < 50;
-  pflag ? gfx_set(0.30,0.42,0.34,1) : gfx_set(0.20,0.22,0.25,1);
-  phit ? gfx_set(0.36,0.40,0.46,1);
-  gfx_rect(ppx, 28, 22, 22);
-  gfx_set(0.5,0.52,0.55,1);
-  gfx_rect(ppx,28,22,1); gfx_rect(ppx,49,22,1); gfx_rect(ppx,28,1,22); gfx_rect(ppx+21,28,1,22);
-  gfx_set(0.9,0.91,0.92,1);
-  gfx_x = ppx+7; gfx_y = 32;
-  sprintf(#pn, "%d", gpi+1);
-  gfx_drawstr(#pn);
+  phit = mouse_x >= ppx && mouse_x < ppx+psz && mouse_y >= psy && mouse_y < psy+psz;
+  phit ? gfx_set(0.165,0.165,0.17,1) : gfx_set(0.12,0.12,0.125,1);
+  gfx_rect(ppx, psy, psz, psz);
+  ppp[0] ? (
+    c_text();
+    dsz = max(2, floor(4*scl));
+    gfx_rect(ppx + (psz-dsz)/2, psy + (psz-dsz)/2, dsz, dsz);
+  );
   phit && lclick ? (
     (mouse_cap & 8) ? preset_save(cur, gpi) :
     (mouse_cap & 16) ? preset_clear(cur, gpi) :
@@ -1308,37 +1363,47 @@ while (gpi < 8) (
   );
   gpi += 1;
 );
-psx += 8*24 + 10;
-btn(psx, 28, 82, 22,
-    outmode < 0.5 ? "OUT: MIX" : outmode < 1.5 ? "OUT: SPLIT" : "OUT: CLASS", outmode > 1.5) ? (
+psx += 8*(psz+pgap) + floor(10*scl);
+
+aw = floor(50*scl);
+btn(psx, y2, aw, row2h,
+    outmode < 0.5 ? "MIX" : outmode < 1.5 ? "SPLIT" : "CLASS", outmode > 1.5) ? (
   outmode = outmode + 1 > 2 ? 0 : outmode + 1;
 );
-psx += 88;
-btn(psx, 28, 92, 22,
-    dk_sync[cur] == 0 ? "SYNC: OFF" : dk_sync[cur] == 1 ? "SYNC: PITCH" : "SYNC: STR",
+psx += aw + floor(6*scl);
+aw = floor(64*scl);
+btn(psx, y2, aw, row2h,
+    dk_sync[cur] == 0 ? "SYNC OFF" : dk_sync[cur] == 1 ? "SYNC PIT" : "SYNC STR",
     dk_sync[cur] > 0) ? (
   dk_sync[cur] = dk_sync[cur] + 1 > 2 ? 0 : dk_sync[cur] + 1;
 );
-psx += 98;
-btn(psx, 28, 44, 22, "A>B", 0) && task == 0 && !capturing ? clone_a_to_b();
-psx += 50;
-btn(psx, 28, 56, 22, keysmode < 0.5 ? "CHROM" : "PIANO", keysmode > 0.5) ? keysmode = !keysmode;
-psx += 62;
+psx += aw + floor(6*scl);
+aw = floor(34*scl);
+btn(psx, y2, aw, row2h, "A>B", 0) && task == 0 && !capturing ? clone_a_to_b();
+psx += aw + floor(6*scl);
+aw = floor(46*scl);
+btn(psx, y2, aw, row2h, keysmode < 0.5 ? "CHROM" : "PIANO", keysmode > 0.5) ? keysmode = !keysmode;
+psx += aw + floor(6*scl);
 
-// crossfader
-xfx = psx + 16; xfw = W - xfx - 24;
-xfw > 60 ? (
-  gfx_set(0.55,0.58,0.62,1);
-  gfx_x = psx; gfx_y = 33; gfx_drawstr("A");
-  gfx_x = xfx + xfw + 6; gfx_y = 33; gfx_drawstr("B");
-  gfx_set(0.20,0.22,0.25,1);
-  gfx_rect(xfx, 34, xfw, 10);
-  gfx_set(0.5,0.52,0.55,1);
-  gfx_rect(xfx,34,xfw,1); gfx_rect(xfx,43,xfw,1);
-  hx = xfx + xfade*xfw;
-  gfx_set(0.9,0.75,0.35,1);
-  gfx_rect(hx-4, 29, 8, 20);
-  (lclick && mouse_x >= xfx-6 && mouse_x < xfx+xfw+6 && mouse_y >= 27 && mouse_y < 51) ? xf_drag = 1;
+// crossfader: value = pointer position, same frame, no easing
+xlw = floor(8*scl);
+xfx = psx + xlw + floor(6*scl);
+xfw = W - M - xlw - floor(6*scl) - xfx;
+xfw > 50*scl ? (
+  gfx_setfont(3);
+  c_dim();
+  gfx_x = psx; gfx_y = y2 + (row2h-fs_lab)/2;
+  gfx_drawstr("A");
+  gfx_x = xfx + xfw + floor(6*scl); gfx_y = y2 + (row2h-fs_lab)/2;
+  gfx_drawstr("B");
+  tky = y2 + row2h/2;
+  c_hair();
+  gfx_rect(xfx, tky, xfw, max(1,floor(2*scl)));
+  hw = max(4, floor(8*scl));
+  hh = floor(18*scl);
+  c_text();
+  gfx_rect(xfx + xfade*xfw - hw/2, tky - hh/2, hw, hh);
+  (lclick && mouse_x >= xfx - hw && mouse_x < xfx+xfw+hw && mouse_y >= y2 - 4 && mouse_y < y2+row2h+4) ? xf_drag = 1;
   xf_drag && (mouse_cap & 1) ? (
     xfade = min(1, max(0, (mouse_x - xfx)/xfw));
     dbl ? xfade = 0.5;
@@ -1346,9 +1411,12 @@ xfw > 60 ? (
   xf_drag && !(mouse_cap & 1) ? xf_drag = 0;
 );
 
-// ---------------- waveform (current deck) ----------------
-gfx_set(0.16,0.165,0.175,1);
+// ---------------- waveform (current deck): spectral peaks ----------------
+c_panel();
 gfx_rect(WX, WY, WW, WH);
+c_hair();
+gfx_rect(WX, WY, WW, 1);
+gfx_rect(WX, WY+WH-1, WW, 1);
 
 fr_show = (capturing && rec_d == cur) ? wr : gfr;
 fr_show > 0 ? (
@@ -1356,7 +1424,7 @@ fr_show > 0 ? (
   gsel >= 0 && gsel < dk_nsl[cur] ? (
     x0 = WX + gsb[OF_START+gsel]/fr_show * WW;
     x1 = WX + gsb[OF_END+gsel]/fr_show * WW;
-    gfx_set(0.25,0.30,0.38,0.45);
+    gfx_set(0.92,0.90,0.88,0.06);
     gfx_rect(x0, WY, max(1, x1-x0), WH);
   );
   cx = 0;
@@ -1383,10 +1451,10 @@ fr_show > 0 ? (
         : ctr < 0.8 ? ( tt = (ctr-0.6)/0.2;   cr = 0.25-0.15*tt; cg2 = 0.85;         cb = 0.35+0.55*tt; )
         :             ( tt = (ctr-0.8)/0.2;   cr = 0.10+0.35*tt; cg2 = 0.85-0.45*tt; cb = 0.92; );
         gfx_set(cr, cg2, cb, 1);
-      ) : gfx_set(0.4, 0.42, 0.45, 1);
+      ) : gfx_set(0.40,0.39,0.36,1);
       y0 = wmid - pmx * (WH/2 - 2);
-      y1 = wmid - pmn * (WH/2 - 2);
-      gfx_line(WX+cx, y0, WX+cx, max(y1, y0+1));
+      y1w = wmid - pmn * (WH/2 - 2);
+      gfx_line(WX+cx, y0, WX+cx, max(y1w, y0+1));
     );
     cx += 1;
   );
@@ -1396,37 +1464,40 @@ fr_show > 0 ? (
     (gsi & 1) ? (
       x0 = WX + gsb[OF_START+gsi]/fr_show * WW;
       x1 = WX + gsb[OF_END+gsi]/fr_show * WW;
-      gfx_set(1,1,1,0.06);
+      gfx_set(1,1,1,0.05);
       gfx_rect(x0, WY, max(1, x1-x0), WH);
     );
     gsi += 1;
   );
-  // slice markers
+  // slice markers: 2px class-color line + flag square + number/note at the bottom
+  mkf = max(6, floor(8*scl));
+  mkw = max(1, floor(2*scl));
   gsi = 0;
   while (gsi < dk_nsl[cur]) (
     gmx = WX + gsb[OF_START+gsi]/fr_show * WW;
     classcol(gsb[OF_CLASS+gsi]);
-    gfx_line(gmx, WY, gmx, WY+WH);
-    gfx_triangle(gmx, WY, gmx+7, WY, gmx, WY+9);
+    gfx_rect(gmx, WY, mkw, WH);
+    gfx_rect(gmx, WY, mkf, mkf);
     gsi == gsel ? (
-      gfx_set(1,1,1,0.9);
-      gfx_line(gmx+1, WY, gmx+1, WY+WH);
+      gfx_set(0.92,0.90,0.88,0.9);
+      gfx_rect(gmx + mkw, WY, 1, WH);
     );
-    gfx_x = gmx+3; gfx_y = WY + WH - 14;
-    gfx_set(0.7,0.72,0.75,1);
+    gfx_setfont(3);
+    c_dim();
+    gfx_x = gmx + floor(4*scl); gfx_y = WY + WH - fs_lab - floor(4*scl);
     notename(slice_note(cur, gsi), #nn);
     sprintf(#sn, "%d %s", gsi+1, #nn);
     gfx_drawstr(#sn);
     gsi += 1;
   );
-  // voice playheads
+  // voice playheads, live position every frame
   gvi = 0;
   while (gvi < NVOICE) (
     gv = V0 + cur*1024 + gvi*VF;
     gv[fA] ? (
       php = (abs(gsb[OF_FXA+64+gv[fS]] - 0.5) > 0.01 || dk_sync[cur] == 2) ? gv[fVT] : gv[fPOS];
       gpx = WX + php/fr_show * WW;
-      gfx_set(1,1,1,0.35 + 0.5*gv[fENV]);
+      gfx_set(0.92,0.90,0.88, 0.3 + 0.55*gv[fENV]);
       gfx_line(gpx, WY, gpx, WY+WH);
     );
     gvi += 1;
@@ -1473,74 +1544,86 @@ drag_marker > 0 && (mouse_cap & 1) ? (
 );
 drag_marker > 0 && !(mouse_cap & 1) ? drag_marker = 0;
 
-// ---------------- pads (current deck) ----------------
+// ---------------- pads: neutral squares, class color as a top bar ----------------
+barh = max(2, floor(3*scl));
 gpi = 0;
 while (gpi < MAXSL) (
   prow = floor(gpi/16); pcol = gpi % 16;
-  gpx = WX + pcol*padw; gpy = PY + prow*(padh+2);
+  gpx = WX + pcol*(padw+padgap); gpy = PY + prow*(padh+padgap);
   gpi < dk_nsl[cur] ? (
-    classcol(gsb[OF_CLASS+gpi]);
-    gpi == gsel ? gfx_a = 1 : gfx_a = 0.55;
-    gfx_rect(gpx, gpy, padw-2, padh);
+    gpi == gsel ? (
+      classcol(gsb[OF_CLASS+gpi]);
+      gfx_rect(gpx, gpy, padw, padh);
+    ) : (
+      gfx_set(0.122,0.122,0.126,1);
+      gfx_rect(gpx, gpy, padw, padh);
+      classcol(gsb[OF_CLASS+gpi]);
+      gfx_rect(gpx, gpy, padw, barh);
+    );
     gvi = 0;
     while (gvi < NVOICE) (
       gv = V0 + cur*1024 + gvi*VF;
       gv[fA] && gv[fS] == gpi ? (
         php = (abs(gsb[OF_FXA+64+gpi] - 0.5) > 0.01 || dk_sync[cur] == 2) ? gv[fVT] : gv[fPOS];
         prg = (php - gsb[OF_START+gpi]) / max(1, gsb[OF_END+gpi] - gsb[OF_START+gpi]);
-        gfx_set(1,1,1,0.9);
-        gfx_rect(gpx, gpy + padh - 3, max(1,(padw-2) * min(1,prg)), 3);
+        gfx_set(0.92,0.90,0.88,0.95);
+        gfx_rect(gpx, gpy + padh - max(1,floor(2*scl)), max(1, padw * min(1,prg)), max(1,floor(2*scl)));
       );
       gvi += 1;
     );
-    gfx_set(0.08,0.08,0.09,1);
-    gfx_x = gpx+3; gfx_y = gpy+2;
+    gfx_setfont(3);
+    gpi == gsel ? gfx_set(0.08,0.08,0.08,1) : c_dim();
+    gfx_x = gpx + max(2,floor(3*scl)); gfx_y = gpy + barh + max(1,floor(2*scl));
     sprintf(#pn, "%d", gpi+1);
     gfx_drawstr(#pn);
-    gfx_x = gpx+3; gfx_y = gpy+padh-14;
-    notename(slice_note(cur, gpi), #pn);
-    gfx_drawstr(#pn);
-    lclick && mouse_x >= gpx && mouse_x < gpx+padw-2 && mouse_y >= gpy && mouse_y < gpy+padh ? (
+    padh >= barh + fs_lab*2 + floor(6*scl) ? (
+      gpi == gsel ? gfx_set(0.08,0.08,0.08,1) : c_faint();
+      gfx_x = gpx + max(2,floor(3*scl)); gfx_y = gpy + padh - fs_lab - max(1,floor(2*scl));
+      notename(slice_note(cur, gpi), #pn);
+      gfx_drawstr(#pn);
+    );
+    lclick && mouse_x >= gpx && mouse_x < gpx+padw && mouse_y >= gpy && mouse_y < gpy+padh ? (
       dk_sel[cur] = gpi;
       pv_deck = cur;
       pv_req = gpi;
     );
   ) : (
-    gfx_set(0.17,0.175,0.185,1);
-    gfx_rect(gpx, gpy, padw-2, padh);
+    gfx_set(0.098,0.098,0.10,1);
+    gfx_rect(gpx, gpy, padw, padh);
   );
   gpi += 1;
 );
 
-// ---------------- selected slice params ----------------
+// ---------------- selected slice: params, fx chain, stretch/routing ----------------
+c_hair();
+gfx_rect(WX, pr_y - 1, WW, 1);
+gfx_rect(WX, pr_y + cellh, WW, 1);
 gsel = dk_sel[cur];
 gsel >= 0 && gsel < dk_nsl[cur] ? (
-  fw = floor((WW - 10) / 6);
-  fh = 30;
-  fy = PRY;
-  fx0 = WX;
+  fw = floor(WW / 6);
+  fy = pr_y;
 
   sprintf(#d, "%.1f st", gsb[OF_PITCH+gsel]);
-  gsb[OF_PITCH+gsel] = ufield(1, fx0, fy, fw-4, fh, -24, 24, 0, 0, gsb[OF_PITCH+gsel], "PITCH", #d);
+  gsb[OF_PITCH+gsel] = ufield(1, WX, fy, fw, cellh, -24, 24, 0, 0, gsb[OF_PITCH+gsel], "PITCH", #d);
   sprintf(#d, "%.1f dB", gsb[OF_GAIN+gsel]);
-  gsb[OF_GAIN+gsel] = ufield(2, fx0+fw, fy, fw-4, fh, -24, 12, 0, 0, gsb[OF_GAIN+gsel], "GAIN", #d);
+  gsb[OF_GAIN+gsel] = ufield(2, WX+fw, fy, fw, cellh, -24, 12, 0, 0, gsb[OF_GAIN+gsel], "GAIN", #d);
   sprintf(#d, "%d", floor(gsb[OF_PAN+gsel]*100+0.5));
-  gsb[OF_PAN+gsel] = ufield(3, fx0+fw*2, fy, fw-4, fh, -1, 1, 0, 0, gsb[OF_PAN+gsel], "PAN", #d);
+  gsb[OF_PAN+gsel] = ufield(3, WX+fw*2, fy, fw, cellh, -1, 1, 0, 0, gsb[OF_PAN+gsel], "PAN", #d);
   modename(gsb[OF_MODE+gsel], #d);
-  gsb[OF_MODE+gsel] = ufield(13, fx0+fw*3, fy, fw-4, fh, 0, 3, 0, 1, gsb[OF_MODE+gsel], "MODE", #d);
+  gsb[OF_MODE+gsel] = ufield(13, WX+fw*3, fy, fw, cellh, 0, 3, 0, 1, gsb[OF_MODE+gsel], "MODE", #d);
   classname(gsb[OF_CLASS+gsel], #d);
-  gsb[OF_CLASS+gsel] = ufield(7, fx0+fw*4, fy, fw-4, fh, 0, 5, 0, 1, gsb[OF_CLASS+gsel], "CLASS", #d);
+  gsb[OF_CLASS+gsel] = ufield(7, WX+fw*4, fy, fw, cellh, 0, 5, 0, 1, gsb[OF_CLASS+gsel], "CLASS", #d);
   sprintf(#d, "%d", gsb[OF_CHOKE+gsel]);
-  gsb[OF_CHOKE+gsel] = floor(ufield(8, fx0+fw*5, fy, fw-4, fh, 0, 4, 0, 1, gsb[OF_CHOKE+gsel], "CHOKE", #d)+0.5);
+  gsb[OF_CHOKE+gsel] = floor(ufield(8, WX+fw*5, fy, WW-fw*5, cellh, 0, 4, 0, 1, gsb[OF_CHOKE+gsel], "CHOKE", #d)+0.5);
 
-  // fx chain: 10 mini sliders, left-drag=amount, right-drag=P2, dbl=reset
-  fy += fh + 4;
-  fxw = floor((WW - 9) / 10);
-  fxh = 44;
+  // fx chain: 10 flat mini sliders, left-drag=amount, right-drag=P2, dbl=reset
+  fxgap = max(2, floor(3*scl));
+  fxw = floor((WW - fxgap*9) / 10);
+  fxlabh = fs_lab + floor(4*scl);
   fxk = 0;
   while (fxk < 10) (
-    sx = WX + fxk*fxw; sy = fy;
-    shit = mouse_x >= sx && mouse_x < sx+fxw-3 && mouse_y >= sy && mouse_y < sy+fxh;
+    sx = WX + fxk*(fxw+fxgap); sy = fx_y;
+    shit = mouse_x >= sx && mouse_x < sx+fxw && mouse_y >= sy && mouse_y < sy+fxh;
     shit && lclick ? (
       dbl ? (
         gsb[OF_FXA + fxk*64 + gsel] = fxk == 1 ? 0.5 : 0;
@@ -1549,109 +1632,117 @@ gsel >= 0 && gsel < dk_nsl[cur] ? (
     );
     shit && rclick ? fxrdrag = fxk+1;
     fxdrag == fxk+1 && (mouse_cap & 1) ? (
-      gsb[OF_FXA + fxk*64 + gsel] = min(1, max(0, 1 - (mouse_y - sy - 12)/(fxh - 14)));
+      gsb[OF_FXA + fxk*64 + gsel] = min(1, max(0, 1 - (mouse_y - sy - fxlabh)/(fxh - fxlabh - 2)));
     );
     fxdrag == fxk+1 && !(mouse_cap & 1) ? fxdrag = 0;
     fxrdrag == fxk+1 && (mouse_cap & 2) ? (
-      gsb[OF_FXP + fxk*64 + gsel] = min(1, max(0, 1 - (mouse_y - sy - 12)/(fxh - 14)));
+      gsb[OF_FXP + fxk*64 + gsel] = min(1, max(0, 1 - (mouse_y - sy - fxlabh)/(fxh - fxlabh - 2)));
     );
     fxrdrag == fxk+1 && !(mouse_cap & 2) ? fxrdrag = 0;
     sval = gsb[OF_FXA + fxk*64 + gsel];
     spv  = gsb[OF_FXP + fxk*64 + gsel];
-    gfx_set(0.20,0.22,0.25,1);
-    gfx_rect(sx, sy, fxw-3, fxh);
+    gfx_set(0.122,0.122,0.126,1);
+    gfx_rect(sx, sy, fxw, fxh);
     fxact = fxk == 1 ? abs(sval - 0.5) > 0.01 : sval > 0.003;
-    fh2 = (fxh - 14) * sval;
-    fxact ? gfx_set(0.95,0.65,0.25,0.9) : gfx_set(0.45,0.50,0.55,0.5);
-    gfx_rect(sx, sy + 12 + (fxh-14) - fh2, fxw-3, fh2);
-    gfx_set(0.40,0.85,0.95,0.9);
-    gfx_rect(sx, sy + 12 + (fxh-14)*(1 - spv), fxw-3, 1);
-    fxact ? gfx_set(0.95,0.9,0.8,1) : gfx_set(0.62,0.65,0.68,1);
-    gfx_x = sx+2; gfx_y = sy;
+    fh2 = (fxh - fxlabh - 2) * sval;
+    fxact ? gfx_set(0.94,0.32,0.12,0.9) : gfx_set(0.35,0.34,0.33,0.5);
+    gfx_rect(sx, sy + fxlabh + (fxh - fxlabh - 2) - fh2, fxw, fh2);
+    gfx_set(0.92,0.90,0.88,0.75);
+    gfx_rect(sx, sy + fxlabh + (fxh - fxlabh - 2)*(1 - spv), fxw, 1);
+    gfx_setfont(3);
+    fxact ? c_text() : c_dim();
+    gfx_x = sx + max(2,floor(3*scl)); gfx_y = sy + max(1,floor(2*scl));
     fxlabel(fxk, #fl);
     gfx_drawstr(#fl);
     fxk += 1;
   );
 
   // stretch quick values + routing/midi-out
-  fy += fxh + 4;
-  gfx_set(0.55,0.58,0.62,1);
-  gfx_x = WX; gfx_y = fy+5;
+  gfx_setfont(3);
+  c_faint();
+  gfx_x = WX; gfx_y = str_y + (strh-fs_lab)/2;
   gfx_drawstr("STR");
-  stx = WX + 28;
+  gfx_measurestr("STR", iw, ih);
+  stx = WX + iw + floor(6*scl);
+  stw = floor(28*scl);
   fxk = 0;
   while (fxk < 7) (
     sf = fxk==0?0.75 : fxk==1?0.5 : fxk==2?1 : fxk==3?1.5 : fxk==4?2 : fxk==5?4 : 8;
     strcpy(#fl, fxk==0?"3/4" : fxk==1?"1/2" : fxk==2?"1x" : fxk==3?"1.5" : fxk==4?"2x" : fxk==5?"4x" : "8x");
     stv = (1 + log(sf)/log(8)) / 2;
-    btn(stx, fy, 30, 24, #fl, abs(gsb[OF_FXA+64+gsel] - stv) < 0.01) ? (
+    btn(stx, str_y, stw, strh, #fl, abs(gsb[OF_FXA+64+gsel] - stv) < 0.01) ? (
       gsb[OF_FXA+64+gsel] = stv;
     );
-    stx += 33;
+    stx += stw + floor(3*scl);
     fxk += 1;
   );
-  ox = stx + 10;
-  ow = floor((WX + WW - ox - 4) / 5);
-  sprintf(#d, "%d", floor(gsb[OF_OUTCH+gsel]+0.5));
-  gsb[OF_OUTCH+gsel] = floor(ufield(14, ox, fy, ow-4, 24, 0, 6, 0, 1, gsb[OF_OUTCH+gsel], "BUS OUT", #d)+0.5);
-  moutname(gsb[OF_MOUT+gsel], #d);
-  gsb[OF_MOUT+gsel] = ufield(9, ox+ow, fy, ow-4, 24, 0, 2, 0, 1, gsb[OF_MOUT+gsel], "MIDI", #d);
-  sprintf(#d, "%d", floor(gsb[OF_MNUM+gsel]+0.5));
-  gsb[OF_MNUM+gsel] = floor(ufield(10, ox+ow*2, fy, ow-4, 24, 0, 127, 36, 0, gsb[OF_MNUM+gsel], "NUM", #d)+0.5);
-  sprintf(#d, "%d", floor(gsb[OF_MCHAN+gsel]+0.5)+1);
-  gsb[OF_MCHAN+gsel] = floor(ufield(11, ox+ow*3, fy, ow-4, 24, 0, 15, 0, 0, gsb[OF_MCHAN+gsel], "CHAN", #d)+0.5);
-  sprintf(#d, "%d", floor(gsb[OF_MBUS+gsel]+0.5)+1);
-  gsb[OF_MBUS+gsel] = floor(ufield(12, ox+ow*4, fy, ow-4, 24, 0, 15, 0, 0, gsb[OF_MBUS+gsel], "BUS", #d)+0.5);
+  ox = stx + floor(8*scl);
+  ow = floor((WX + WW - ox) / 5);
+  ow > 30*scl ? (
+    sprintf(#d, "%d", floor(gsb[OF_OUTCH+gsel]+0.5));
+    gsb[OF_OUTCH+gsel] = floor(ufield(14, ox, str_y, ow, strh, 0, 6, 0, 1, gsb[OF_OUTCH+gsel], "BUS OUT", #d)+0.5);
+    moutname(gsb[OF_MOUT+gsel], #d);
+    gsb[OF_MOUT+gsel] = ufield(9, ox+ow, str_y, ow, strh, 0, 2, 0, 1, gsb[OF_MOUT+gsel], "MIDI", #d);
+    sprintf(#d, "%d", floor(gsb[OF_MNUM+gsel]+0.5));
+    gsb[OF_MNUM+gsel] = floor(ufield(10, ox+ow*2, str_y, ow, strh, 0, 127, 36, 0, gsb[OF_MNUM+gsel], "NUM", #d)+0.5);
+    sprintf(#d, "%d", floor(gsb[OF_MCHAN+gsel]+0.5)+1);
+    gsb[OF_MCHAN+gsel] = floor(ufield(11, ox+ow*3, str_y, ow, strh, 0, 15, 0, 0, gsb[OF_MCHAN+gsel], "CHAN", #d)+0.5);
+    sprintf(#d, "%d", floor(gsb[OF_MBUS+gsel]+0.5)+1);
+    gsb[OF_MBUS+gsel] = floor(ufield(12, ox+ow*4, str_y, WX+WW-ox-ow*4, strh, 0, 15, 0, 0, gsb[OF_MBUS+gsel], "BUS", #d)+0.5);
+  );
 ) : (
-  gfx_set(0.4,0.42,0.45,1);
-  gfx_x = WX; gfx_y = PRY + 8;
+  gfx_setfont(3);
+  c_faint();
+  gfx_x = WX + cpad; gfx_y = pr_y + cellh - fs_lab*2;
   gfx_drawstr("no slice selected - LOAD a file, ITEM (selected item), drop a file here, or REC, then play pads via MIDI");
 );
 
 // ---------------- footer: global playback fields ----------------
-fy2 = PRY + 30 + 4 + 44 + 4 + 24 + 8;
-fy2 + 26 < H - 16 ? (
-  fw2 = floor((WW - 10) / 8);
-  strcpy(#d, monomode ? "MONO" : "POLY");
-  monomode = ufield(20, WX, fy2, fw2-4, 26, 0, 1, 0, 1, monomode, "VOICES", #d);
-  strcpy(#d, legato ? "ON" : "OFF");
-  legato = ufield(21, WX+fw2, fy2, fw2-4, 26, 0, 1, 0, 1, legato, "LEGATO", #d);
-  sprintf(#d, "%d ms", floor(glide_ms+0.5));
-  glide_ms = ufield(22, WX+fw2*2, fy2, fw2-4, 26, 0, 500, 0, 0, glide_ms, "GLIDE", #d);
-  strcpy(#d, interp < 0.5 ? "NONE" : interp < 1.5 ? "LIN" : "HERM");
-  interp = ufield(23, WX+fw2*3, fy2, fw2-4, 26, 0, 2, 2, 1, interp, "INTERP", #d);
-  strcpy(#d, gatemode ? "GATE" : "1-SHOT");
-  gatemode = ufield(24, WX+fw2*4, fy2, fw2-4, 26, 0, 1, 0, 1, gatemode, "TRIG", #d);
-  cur ? (
-    sprintf(#d, "%d", floor(basenote_b+0.5));
-    basenote_b = floor(ufield(25, WX+fw2*5, fy2, fw2-4, 26, 0, 127, 84, 0, basenote_b, "BASE B", #d)+0.5);
-    gmch = mchb;
-    gmch < 0.5 ? strcpy(#d, "OMNI") : sprintf(#d, "%d", floor(gmch+0.5));
-    mchb = floor(ufield(26, WX+fw2*6, fy2, fw2-4, 26, 0, 16, 0, 1, mchb, "CH B", #d)+0.5);
-  ) : (
-    sprintf(#d, "%d", floor(basenote_a+0.5));
-    basenote_a = floor(ufield(25, WX+fw2*5, fy2, fw2-4, 26, 0, 127, 36, 0, basenote_a, "BASE A", #d)+0.5);
-    gmch = mcha;
-    gmch < 0.5 ? strcpy(#d, "OMNI") : sprintf(#d, "%d", floor(gmch+0.5));
-    mcha = floor(ufield(26, WX+fw2*6, fy2, fw2-4, 26, 0, 16, 0, 1, mcha, "CH A", #d)+0.5);
-  );
-  sprintf(#d, "%d ms", floor(preroll_ms+0.5));
-  preroll_ms = floor(ufield(27, WX+fw2*7, fy2, fw2-4, 26, 0, 100, 5, 0, preroll_ms, "PREROLL", #d)+0.5);
+c_hair();
+gfx_rect(WX, foot_y - 1, WW, 1);
+gfx_rect(WX, foot_y + footh, WW, 1);
+fw2 = floor(WW / 8);
+strcpy(#d, monomode ? "MONO" : "POLY");
+monomode = ufield(20, WX, foot_y, fw2, footh, 0, 1, 0, 1, monomode, "VOICES", #d);
+strcpy(#d, legato ? "ON" : "OFF");
+legato = ufield(21, WX+fw2, foot_y, fw2, footh, 0, 1, 0, 1, legato, "LEGATO", #d);
+sprintf(#d, "%d ms", floor(glide_ms+0.5));
+glide_ms = ufield(22, WX+fw2*2, foot_y, fw2, footh, 0, 500, 0, 0, glide_ms, "GLIDE", #d);
+strcpy(#d, interp < 0.5 ? "NONE" : interp < 1.5 ? "LIN" : "HERM");
+interp = ufield(23, WX+fw2*3, foot_y, fw2, footh, 0, 2, 2, 1, interp, "INTERP", #d);
+strcpy(#d, gatemode ? "GATE" : "1-SHOT");
+gatemode = ufield(24, WX+fw2*4, foot_y, fw2, footh, 0, 1, 0, 1, gatemode, "TRIG", #d);
+cur ? (
+  sprintf(#d, "%d", floor(basenote_b+0.5));
+  basenote_b = floor(ufield(25, WX+fw2*5, foot_y, fw2, footh, 0, 127, 84, 0, basenote_b, "BASE B", #d)+0.5);
+  mchb < 0.5 ? strcpy(#d, "OMNI") : sprintf(#d, "%d", floor(mchb+0.5));
+  mchb = floor(ufield(26, WX+fw2*6, foot_y, fw2, footh, 0, 16, 0, 1, mchb, "CH B", #d)+0.5);
+) : (
+  sprintf(#d, "%d", floor(basenote_a+0.5));
+  basenote_a = floor(ufield(25, WX+fw2*5, foot_y, fw2, footh, 0, 127, 36, 0, basenote_a, "BASE A", #d)+0.5);
+  mcha < 0.5 ? strcpy(#d, "OMNI") : sprintf(#d, "%d", floor(mcha+0.5));
+  mcha = floor(ufield(26, WX+fw2*6, foot_y, fw2, footh, 0, 16, 0, 1, mcha, "CH A", #d)+0.5);
 );
+sprintf(#d, "%d ms", floor(preroll_ms+0.5));
+preroll_ms = floor(ufield(27, WX+fw2*7, foot_y, WW-fw2*7, footh, 0, 100, 5, 0, preroll_ms, "PREROLL", #d)+0.5);
 
-gfx_set(0.38,0.40,0.43,1);
-gfx_x = WX; gfx_y = H - 15;
+// ---------------- hint ----------------
+gfx_setfont(3);
+gfx_x = WX; gfx_y = H - hinth;
 warn_t > 0 && time_precise() - warn_t < 4 ? (
-  gfx_set(0.95,0.6,0.3,1);
+  c_acc();
   gfx_drawstr("helper off: run jf_slixer_helper.lua once (Actions) or restart REAPER for autostart");
 ) : (
-  gfx_drawstr("v0.9 | PIANO: white keys=slices, black: C#stut D#glit F#crush G#down A#ring (vel=depth) | fx row: drag=amt rdrag=P2 dbl=reset | OUT:CLASS = buses 3-14");
+  c_faint();
+  gfx_drawstr("v1.0 | piano: white=slices, black: C#stut D#glit F#crush G#down A#ring | fx: drag=amt rdrag=P2 dbl=reset | wave: dbl add · alt del");
 );
 
 task ? (
-  gfx_set(0.9,0.8,0.3,1);
-  gfx_x = W - 90; gfx_y = H - 15;
-  gfx_drawstr(task == 1 ? "detecting..." : task == 2 ? "classifying..." : "rebuilding...");
+  c_acc();
+  sprintf(#d, "%s", task == 1 ? "detecting" : task == 2 ? "classifying" : "rebuilding");
+  gfx_measurestr(#d, iw, ih);
+  gfx_x = W - M - iw; gfx_y = H - hinth;
+  gfx_drawstr(#d);
 );
 
 last_cap = mouse_cap;
